@@ -18,6 +18,14 @@ Or build from source:
 cargo build --release
 ```
 
+### macOS Gatekeeper
+
+Downloaded binaries may be blocked by Gatekeeper. To allow:
+
+```
+xattr -cr /path/to/n0qlog
+```
+
 ## Usage
 
 ### Running the Application
