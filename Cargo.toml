@@ -1,0 +1,48 @@
+[package]
+name = "n0qlog"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.76"
+authors = ["Asmir Avdicevic <asmir@gekkotech.io", "n0 team"]
+keywords = ["qlog", "quic", "network", "visualization", "debugging"]
+categories = ["visualization", "network-programming", "development-tools"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/n0-computer/n0qlog"
+description = "A GUI viewer for qlog files to visualize and debug QUIC connections"
+readme = "README.md"
+
+[dependencies]
+# GUI framework
+egui = "0.33"
+eframe = { version = "0.33", default-features = true, features = ["default_fonts", "glow"] }
+egui_extras = { version = "0.33", features = ["all_loaders"] }
+
+# Plotting
+egui_plot = "0.34"
+
+# qlog parsing
+qlog = "0.15"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sonic-rs = "0.5"
+
+# File dialog
+rfd = "0.16"
+
+# Utilities
+anyhow = "1.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+parking_lot = "0.12"
+
+# Performance
+rayon = "1.10"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
