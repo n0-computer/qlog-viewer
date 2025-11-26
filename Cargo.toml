@@ -7,7 +7,7 @@ authors = ["Asmir Avdicevic <asmir@gekkotech.io", "n0 team"]
 keywords = ["qlog", "quic", "network", "visualization", "debugging"]
 categories = ["visualization", "network-programming", "development-tools"]
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/n0-computer/n0qlog"
+repository = "https://github.com/n0-computer/qlog"
 description = "A GUI viewer for qlog files to visualize and debug QUIC connections"
 readme = "README.md"
 
