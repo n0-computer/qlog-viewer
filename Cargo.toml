@@ -1,6 +1,6 @@
 [package]
 name = "n0qlog"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.76"
 authors = ["Asmir Avdicevic <asmir@gekkotech.io", "n0 team"]
@@ -41,8 +41,9 @@ rayon = "1.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[profile.release]
-opt-level = 3
+# CI release profile with heavy optimizations for distribution builds
+[profile.ci-release]
+inherits = "release"
 lto = true
 codegen-units = 1
 strip = true
