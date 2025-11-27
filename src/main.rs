@@ -1,9 +1,11 @@
 mod app;
 mod congestion_graph;
 mod multiplexing_diagram;
+mod packet_correlation;
 mod packetization_diagram;
 mod qlog_data;
 mod sequence_diagram;
+mod stats_view;
 mod utils;
 
 use app::QlogViewerApp;

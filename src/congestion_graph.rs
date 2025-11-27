@@ -1,6 +1,8 @@
+use crate::packet_correlation::PacketCorrelation;
 use crate::qlog_data::QlogData;
+use crate::utils::format_bytes;
 use egui::Color32;
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{Line, Plot, PlotPoints, Polygon, VLine};
 use qlog::events::EventData;
 
 pub struct CongestionGraph {
@@ -12,6 +14,9 @@ pub struct CongestionGraph {
     show_smoothed_rtt: bool,
     show_latest_rtt: bool,
     show_min_rtt: bool,
+    show_congestion_states: bool,
+    show_time_gaps: bool,
+    time_gap_threshold_ms: f32,
 }
 
 impl CongestionGraph {
@@ -25,10 +30,18 @@ impl CongestionGraph {
             show_smoothed_rtt: true,
             show_latest_rtt: true,
             show_min_rtt: true,
+            show_congestion_states: true,
+            show_time_gaps: false,
+            time_gap_threshold_ms: 50.0,
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, qlog_data: &QlogData) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        qlog_data: &QlogData,
+        correlation: &PacketCorrelation,
+    ) {
         ui.horizontal(|ui| {
             ui.heading("Congestion Graph");
             ui.separator();
@@ -45,6 +58,15 @@ impl CongestionGraph {
             ui.separator();
             ui.checkbox(&mut self.show_cwnd, "Cwnd");
             ui.checkbox(&mut self.show_bytes_in_flight, "In Flight");
+            ui.separator();
+            ui.checkbox(&mut self.show_congestion_states, "CC States");
+            ui.checkbox(&mut self.show_time_gaps, "Time Gaps");
+            if self.show_time_gaps {
+                ui.add(
+                    egui::Slider::new(&mut self.time_gap_threshold_ms, 10.0..=500.0)
+                        .text("Gap (ms)"),
+                );
+            }
         });
         ui.separator();
 
@@ -60,9 +82,42 @@ impl CongestionGraph {
             .y_axis_label("Bytes")
             .height(ui.available_height() * 0.45)
             .link_axis("congestion_time", true)
-            .link_cursor("congestion_time", true);
+            .link_cursor("congestion_time", true)
+            .show_x(true)
+            .show_y(true)
+            .label_formatter(Self::create_label_formatter(&metrics, true));
+
+        let max_y = metrics.max_y_value();
 
         congestion_plot.show(ui, |plot_ui| {
+            if self.show_congestion_states {
+                for period in &correlation.congestion_states {
+                    let points = vec![
+                        [period.start_time as f64, 0.0],
+                        [period.start_time as f64, max_y],
+                        [period.end_time as f64, max_y],
+                        [period.end_time as f64, 0.0],
+                    ];
+                    let polygon = Polygon::new(period.state.name(), PlotPoints::from(points))
+                        .fill_color(period.state.color())
+                        .stroke(egui::Stroke::NONE);
+                    plot_ui.polygon(polygon);
+                }
+            }
+
+            if self.show_time_gaps {
+                for gap in correlation.visible_time_gaps(correlation.min_time, correlation.max_time)
+                {
+                    if gap.duration >= self.time_gap_threshold_ms {
+                        let intensity = ((gap.duration / 500.0).min(1.0) * 200.0) as u8;
+                        let vline = VLine::new("", gap.start_time as f64)
+                            .color(Color32::from_rgba_unmultiplied(255, 100, 0, 50 + intensity))
+                            .width(2.0);
+                        plot_ui.vline(vline);
+                    }
+                }
+            }
+
             if self.show_data_sent && !metrics.data_sent_points.is_empty() {
                 let line = Line::new(
                     "Data sent (includes retransmits)",
@@ -134,7 +189,10 @@ impl CongestionGraph {
             .y_axis_label("RTT (ms)")
             .height(ui.available_height() * 0.9)
             .link_axis("congestion_time", true)
-            .link_cursor("congestion_time", true);
+            .link_cursor("congestion_time", true)
+            .show_x(true)
+            .show_y(true)
+            .label_formatter(Self::create_label_formatter(&metrics, false));
 
         rtt_plot.show(ui, |plot_ui| {
             if self.show_min_rtt && !metrics.min_rtt_points.is_empty() {
@@ -264,6 +322,85 @@ impl CongestionGraph {
             .take(max_points)
             .collect()
     }
+
+    fn create_label_formatter(
+        metrics: &MetricsData,
+        is_congestion_plot: bool,
+    ) -> impl Fn(&str, &egui_plot::PlotPoint) -> String {
+        let cwnd = metrics.cwnd_points.clone();
+        let bif = metrics.bytes_in_flight_points.clone();
+        let data_sent = metrics.data_sent_points.clone();
+        let data_acked = metrics.data_acked_points.clone();
+        let data_lost = metrics.data_lost_points.clone();
+        let smoothed_rtt = metrics.smoothed_rtt_points.clone();
+        let latest_rtt = metrics.latest_rtt_points.clone();
+        let min_rtt = metrics.min_rtt_points.clone();
+
+        move |_name: &str, point: &egui_plot::PlotPoint| {
+            let x = point.x;
+            let mut lines = vec![format!("Time: {:.2} ms", x)];
+
+            if is_congestion_plot {
+                if let Some(val) = Self::find_nearest_value(&data_sent, x) {
+                    lines.push(format!("Data Sent: {}", format_bytes(val as u64)));
+                }
+                if let Some(val) = Self::find_nearest_value(&data_acked, x) {
+                    lines.push(format!("Data Acked: {}", format_bytes(val as u64)));
+                }
+                if let Some(val) = Self::find_nearest_value(&data_lost, x) {
+                    lines.push(format!("Data Lost: {}", format_bytes(val as u64)));
+                }
+                if let Some(val) = Self::find_nearest_value(&cwnd, x) {
+                    lines.push(format!("Cwnd: {}", format_bytes(val as u64)));
+                }
+                if let Some(val) = Self::find_nearest_value(&bif, x) {
+                    lines.push(format!("In Flight: {}", format_bytes(val as u64)));
+                }
+            } else {
+                if let Some(val) = Self::find_nearest_value(&smoothed_rtt, x) {
+                    lines.push(format!("Smoothed RTT: {:.2} ms", val));
+                }
+                if let Some(val) = Self::find_nearest_value(&latest_rtt, x) {
+                    lines.push(format!("Latest RTT: {:.2} ms", val));
+                }
+                if let Some(val) = Self::find_nearest_value(&min_rtt, x) {
+                    lines.push(format!("Min RTT: {:.2} ms", val));
+                }
+            }
+
+            lines.join("\n")
+        }
+    }
+
+    fn find_nearest_value(points: &[[f64; 2]], x: f64) -> Option<f64> {
+        if points.is_empty() {
+            return None;
+        }
+
+        // Binary search for closest point
+        let idx = points
+            .binary_search_by(|p| p[0].partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or_else(|i| i);
+
+        // Check points around the found index
+        let tolerance = 50.0; // ms tolerance for "nearby" points
+        let candidates: Vec<_> = [idx.checked_sub(1), Some(idx), Some(idx + 1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|i| points.get(i))
+            .filter(|p| (p[0] - x).abs() < tolerance)
+            .collect();
+
+        candidates
+            .into_iter()
+            .min_by(|a, b| {
+                (a[0] - x)
+                    .abs()
+                    .partial_cmp(&(b[0] - x).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|p| p[1])
+    }
 }
 
 struct MetricsData {
@@ -278,4 +415,22 @@ struct MetricsData {
     metrics_event_count: usize,
     packets_sent: u64,
     packets_acked: u64,
+}
+
+impl MetricsData {
+    fn max_y_value(&self) -> f64 {
+        let max_from_points =
+            |points: &[[f64; 2]]| -> f64 { points.iter().map(|p| p[1]).fold(0.0, f64::max) };
+
+        [
+            max_from_points(&self.data_sent_points),
+            max_from_points(&self.data_acked_points),
+            max_from_points(&self.data_lost_points),
+            max_from_points(&self.cwnd_points),
+            max_from_points(&self.bytes_in_flight_points),
+        ]
+        .into_iter()
+        .fold(0.0, f64::max)
+        .max(1.0) // Ensure at least 1.0
+    }
 }

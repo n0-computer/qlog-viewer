@@ -1,8 +1,9 @@
+use crate::packet_correlation::PacketCorrelation;
 use crate::qlog_data::QlogData;
 use crate::utils::{self, FrameType};
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use qlog::events::EventData;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 const PACKET_HEIGHT: f32 = 35.0;
 const VISIBLE_BUFFER: usize = 10;
@@ -15,6 +16,9 @@ pub struct SequenceDiagram {
     available_packet_types: Vec<String>,
     filter_stream_id: Option<u64>,
     filter_packet_type: Option<String>,
+    show_loss_markers: bool,
+    show_reordering: bool,
+    show_rtt: bool,
 }
 
 impl SequenceDiagram {
@@ -27,6 +31,9 @@ impl SequenceDiagram {
             available_packet_types: Vec::new(),
             filter_stream_id: None,
             filter_packet_type: None,
+            show_loss_markers: true,
+            show_reordering: false,
+            show_rtt: false,
         }
     }
 
@@ -43,6 +50,7 @@ impl SequenceDiagram {
         &mut self,
         ui: &mut egui::Ui,
         qlog_data: &QlogData,
+        correlation: &PacketCorrelation,
         selected_event_idx: &mut Option<usize>,
     ) {
         if !self.cache_valid {
@@ -116,6 +124,19 @@ impl SequenceDiagram {
                 self.filter_packet_type = None;
                 self.filter_stream_id = None;
             }
+
+            ui.separator();
+            ui.checkbox(&mut self.show_loss_markers, "Show Lost");
+            if self.show_loss_markers && correlation.loss_count() > 0 {
+                ui.label(format!("({} lost)", correlation.loss_count()));
+            }
+            ui.separator();
+            ui.checkbox(&mut self.show_reordering, "Show Reordering");
+            if self.show_reordering && !correlation.reorderings.is_empty() {
+                ui.label(format!("({} reorders)", correlation.reorderings.len()));
+            }
+            ui.separator();
+            ui.checkbox(&mut self.show_rtt, "Show RTT");
         });
         ui.separator();
 
@@ -231,85 +252,118 @@ impl SequenceDiagram {
                     Stroke::new(2.0, Color32::GRAY),
                 );
 
+                let sent_color = Color32::from_rgb(0, 150, 255);
+                let received_color = Color32::from_rgb(220, 80, 80);
+
                 for idx in first_visible_idx..last_visible_idx {
                     if idx >= filtered_packets.len() {
                         break;
                     }
                     let packet = filtered_packets[idx];
-                    let y = top_y + (idx as f32 * PACKET_HEIGHT) + PACKET_HEIGHT / 2.0;
+                    let y_start = top_y + (idx as f32 * PACKET_HEIGHT) + PACKET_HEIGHT / 2.0;
 
-                    let (start_x, end_x, color) = match packet.direction {
+                    let diagonal_offset = PACKET_HEIGHT * 0.4;
+
+                    let (start_x, end_x, y_end, color) = match packet.direction {
                         PacketDirection::Sent => {
-                            (client_x, server_x, Color32::from_rgb(0, 150, 255))
+                            (client_x, server_x, y_start + diagonal_offset, sent_color)
                         }
-                        PacketDirection::Received => {
-                            (server_x, client_x, Color32::from_rgb(220, 80, 80))
-                        }
+                        PacketDirection::Received => (
+                            server_x,
+                            client_x,
+                            y_start + diagonal_offset,
+                            received_color,
+                        ),
                     };
 
+                    // Draw horizontal time marker lines across timelines
+                    let time_line_half_width = 20.0;
                     painter.line_segment(
-                        [Pos2::new(start_x, y), Pos2::new(end_x, y + 4.0)],
-                        Stroke::new(2.5, color),
+                        [
+                            Pos2::new(start_x - time_line_half_width, y_start),
+                            Pos2::new(start_x + time_line_half_width, y_start),
+                        ],
+                        Stroke::new(1.5, color),
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(end_x - time_line_half_width, y_end),
+                            Pos2::new(end_x + time_line_half_width, y_end),
+                        ],
+                        Stroke::new(1.5, color),
                     );
 
-                    let arrow_dir = if start_x < end_x { 1.0 } else { -1.0 };
-                    let tip = Pos2::new(end_x, y + 4.0);
+                    // Draw diagonal arrow line
                     painter.line_segment(
-                        [tip, Pos2::new(end_x - arrow_dir * 12.0, y - 4.0)],
-                        Stroke::new(2.5, color),
-                    );
-                    painter.line_segment(
-                        [tip, Pos2::new(end_x - arrow_dir * 12.0, y + 12.0)],
-                        Stroke::new(2.5, color),
+                        [Pos2::new(start_x, y_start), Pos2::new(end_x, y_end)],
+                        Stroke::new(2.0, color),
                     );
 
+                    // Draw small circle markers at endpoints
+                    painter.circle_filled(Pos2::new(start_x, y_start), 4.0, color);
+                    painter.circle_filled(Pos2::new(end_x, y_end), 4.0, color);
+
+                    // Time label on the left
                     painter.text(
-                        Pos2::new(rect.left() + 8.0, y + 2.0),
+                        Pos2::new(rect.left() + 8.0, y_start),
                         egui::Align2::LEFT_CENTER,
                         format!("{:.2}", packet.time),
-                        egui::FontId::proportional(12.0),
-                        Color32::LIGHT_GRAY,
+                        egui::FontId::proportional(11.0),
+                        Color32::GRAY,
                     );
 
+                    // Frame tags along the arrow
                     let mid_x = (start_x + end_x) / 2.0;
-                    let frames_to_show: Vec<&FrameType> = packet.frames.iter().take(5).collect();
-                    let tag_width = 40.0;
-                    let tag_gap = 3.0;
+                    let mid_y = (y_start + y_end) / 2.0;
+                    let frames_to_show: Vec<&FrameType> = packet.frames.iter().take(4).collect();
+                    let tag_width = 38.0;
+                    let tag_gap = 2.0;
                     let total_tags_width = frames_to_show.len() as f32 * (tag_width + tag_gap);
                     let tag_start_x = mid_x - total_tags_width / 2.0;
 
                     for (fi, frame) in frames_to_show.iter().enumerate() {
                         let tag_x = tag_start_x + (fi as f32 * (tag_width + tag_gap));
                         let tag_rect = Rect::from_min_size(
-                            Pos2::new(tag_x, y - 16.0),
-                            Vec2::new(tag_width, 18.0),
+                            Pos2::new(tag_x, mid_y - 10.0),
+                            Vec2::new(tag_width, 14.0),
                         );
-                        painter.rect_filled(tag_rect, 3.0, frame.color());
+                        painter.rect_filled(tag_rect, 2.0, frame.color());
                         painter.text(
                             tag_rect.center(),
                             egui::Align2::CENTER_CENTER,
                             frame.short_name(),
-                            egui::FontId::proportional(10.0),
+                            egui::FontId::proportional(9.0),
                             Color32::WHITE,
                         );
                     }
 
+                    // Packet info on the right side
+                    painter.text(
+                        Pos2::new(rect.right() - 10.0, y_end),
+                        egui::Align2::RIGHT_CENTER,
+                        format!("{:.2}", packet.time),
+                        egui::FontId::proportional(11.0),
+                        Color32::GRAY,
+                    );
+
+                    // Packet type label near the arrow end
                     let info_x = if start_x < end_x {
-                        end_x + 12.0
+                        end_x + 8.0
                     } else {
-                        start_x + 12.0
+                        start_x + 8.0
                     };
                     painter.text(
-                        Pos2::new(info_x, y + 2.0),
+                        Pos2::new(info_x, (y_start + y_end) / 2.0),
                         egui::Align2::LEFT_CENTER,
                         format!("{}:{}", packet.packet_type_short, packet.packet_number),
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional(10.0),
                         Color32::LIGHT_GRAY,
                     );
 
+                    // Click detection area
                     let arrow_rect = Rect::from_two_pos(
-                        Pos2::new(start_x.min(end_x) - 5.0, y - 18.0),
-                        Pos2::new(start_x.max(end_x) + 5.0, y + 18.0),
+                        Pos2::new(start_x.min(end_x) - 5.0, y_start.min(y_end) - 12.0),
+                        Pos2::new(start_x.max(end_x) + 5.0, y_start.max(y_end) + 12.0),
                     );
                     if response.clicked() {
                         if let Some(pos) = response.interact_pointer_pos() {
@@ -327,6 +381,100 @@ impl SequenceDiagram {
                             Stroke::new(2.0, Color32::YELLOW),
                             StrokeKind::Inside,
                         );
+                    }
+
+                    // Draw red X for lost packets
+                    if self.show_loss_markers
+                        && packet.direction == PacketDirection::Sent
+                        && correlation.is_packet_lost(packet.packet_number)
+                    {
+                        let x_size = 8.0;
+                        let x_center = mid_x;
+                        let x_y = mid_y + 16.0;
+
+                        painter.line_segment(
+                            [
+                                Pos2::new(x_center - x_size, x_y - x_size),
+                                Pos2::new(x_center + x_size, x_y + x_size),
+                            ],
+                            Stroke::new(3.0, Color32::RED),
+                        );
+                        painter.line_segment(
+                            [
+                                Pos2::new(x_center - x_size, x_y + x_size),
+                                Pos2::new(x_center + x_size, x_y - x_size),
+                            ],
+                            Stroke::new(3.0, Color32::RED),
+                        );
+                    }
+
+                    // Draw RTT annotation for ACKed packets
+                    if self.show_rtt && packet.direction == PacketDirection::Sent {
+                        if let Some(rtt) = correlation.get_rtt(packet.packet_number) {
+                            let rtt_text = format!("{:.1}ms", rtt);
+                            painter.text(
+                                Pos2::new(mid_x + 5.0, y_start - 2.0),
+                                egui::Align2::LEFT_BOTTOM,
+                                rtt_text,
+                                egui::FontId::proportional(9.0),
+                                Color32::from_rgb(100, 200, 100),
+                            );
+                        }
+                    }
+                }
+
+                // Draw reordering indicators for out-of-order packet arrivals
+                if self.show_reordering {
+                    let visible_start = filtered_packets
+                        .get(first_visible_idx)
+                        .map(|p| p.time as f32)
+                        .unwrap_or(0.0);
+                    let visible_end = filtered_packets
+                        .get(last_visible_idx.saturating_sub(1))
+                        .map(|p| p.time as f32)
+                        .unwrap_or(f32::MAX);
+
+                    let pn_to_y: HashMap<u64, f32> = (first_visible_idx..last_visible_idx)
+                        .filter_map(|idx| filtered_packets.get(idx))
+                        .filter(|p| p.direction == PacketDirection::Received)
+                        .enumerate()
+                        .map(|(i, p)| {
+                            (
+                                p.packet_number,
+                                top_y
+                                    + (first_visible_idx + i) as f32 * PACKET_HEIGHT
+                                    + PACKET_HEIGHT / 2.0,
+                            )
+                        })
+                        .collect();
+
+                    let reorder_color = Color32::from_rgb(255, 140, 0);
+                    let line_x = server_x + 15.0;
+
+                    for reorder in correlation.visible_reorderings(visible_start, visible_end, 50) {
+                        let (Some(&y1), Some(&y2)) = (
+                            pn_to_y.get(&reorder.earlier_pn),
+                            pn_to_y.get(&reorder.later_pn),
+                        ) else {
+                            continue;
+                        };
+
+                        painter.line_segment(
+                            [Pos2::new(line_x, y1), Pos2::new(line_x, y2)],
+                            Stroke::new(2.0, reorder_color),
+                        );
+                        painter.circle_filled(Pos2::new(line_x, y1), 5.0, reorder_color);
+                        painter.circle_filled(Pos2::new(line_x, y2), 5.0, reorder_color);
+
+                        for (y, pn) in [(y1, reorder.earlier_pn), (y2, reorder.later_pn)] {
+                            painter.text(
+                                Pos2::new(line_x + 8.0, y),
+                                egui::Align2::LEFT_CENTER,
+                                format!("#{pn}"),
+                                egui::FontId::proportional(9.0),
+                                reorder_color,
+                            );
+                        }
                     }
                 }
 

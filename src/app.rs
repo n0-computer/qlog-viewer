@@ -1,8 +1,10 @@
 use crate::congestion_graph::CongestionGraph;
 use crate::multiplexing_diagram::MultiplexingDiagram;
+use crate::packet_correlation::PacketCorrelation;
 use crate::packetization_diagram::PacketizationDiagram;
 use crate::qlog_data::QlogData;
 use crate::sequence_diagram::SequenceDiagram;
+use crate::stats_view::StatsView;
 use crate::utils;
 use egui::{CentralPanel, Context, SidePanel, TopBottomPanel};
 use qlog::events::{quic::QuicFrame, Event, EventData};
@@ -18,6 +20,7 @@ enum ViewMode {
     #[allow(dead_code)]
     MultiplexingDiagram,
     PacketizationDiagram,
+    StatsView,
 }
 
 struct EventListFilterOptions<'a> {
@@ -28,6 +31,7 @@ struct EventListFilterOptions<'a> {
 pub struct QlogViewerApp {
     loaded_file: Option<PathBuf>,
     qlog_data: Option<QlogData>,
+    packet_correlation: Option<PacketCorrelation>,
     loading: bool,
     error_message: Option<String>,
     selected_event_idx: Option<usize>,
@@ -42,6 +46,7 @@ pub struct QlogViewerApp {
     congestion_graph: CongestionGraph,
     multiplexing_diagram: MultiplexingDiagram,
     packetization_diagram: PacketizationDiagram,
+    stats_view: StatsView,
 }
 
 impl QlogViewerApp {
@@ -49,6 +54,7 @@ impl QlogViewerApp {
         Self {
             loaded_file: None,
             qlog_data: None,
+            packet_correlation: None,
             loading: false,
             error_message: None,
             selected_event_idx: None,
@@ -63,6 +69,7 @@ impl QlogViewerApp {
             congestion_graph: CongestionGraph::new(),
             multiplexing_diagram: MultiplexingDiagram::new(),
             packetization_diagram: PacketizationDiagram::new(),
+            stats_view: StatsView::new(),
         }
     }
 
@@ -118,6 +125,12 @@ impl QlogViewerApp {
                         .clicked()
                     {
                         self.view_mode = ViewMode::PacketizationDiagram;
+                    }
+                    if ui
+                        .radio(self.view_mode == ViewMode::StatsView, "Statistics")
+                        .clicked()
+                    {
+                        self.view_mode = ViewMode::StatsView;
                     }
                     ui.separator();
                     ui.checkbox(&mut self.show_event_detail, "Show Event Detail Panel");
@@ -181,11 +194,23 @@ impl QlogViewerApp {
                         self.selected_event_idx = selected;
                     }
                     ViewMode::SequenceDiagram => {
-                        self.sequence_diagram
-                            .show(ui, data, &mut self.selected_event_idx);
+                        if let Some(ref correlation) = self.packet_correlation {
+                            self.sequence_diagram.show(
+                                ui,
+                                data,
+                                correlation,
+                                &mut self.selected_event_idx,
+                            );
+                        } else {
+                            ui.label("Loading correlation data...");
+                        }
                     }
                     ViewMode::CongestionGraph => {
-                        self.congestion_graph.show(ui, data);
+                        if let Some(ref correlation) = self.packet_correlation {
+                            self.congestion_graph.show(ui, data, correlation);
+                        } else {
+                            ui.label("Loading correlation data...");
+                        }
                     }
                     ViewMode::MultiplexingDiagram => {
                         self.multiplexing_diagram.show(ui, data);
@@ -193,6 +218,9 @@ impl QlogViewerApp {
                     ViewMode::PacketizationDiagram => {
                         self.packetization_diagram
                             .show(ui, data, &mut self.selected_event_idx);
+                    }
+                    ViewMode::StatsView => {
+                        self.stats_view.show(ui);
                     }
                 },
                 None => {
@@ -432,6 +460,22 @@ impl QlogViewerApp {
                 let (stream_ids, packet_types) = Self::extract_filter_options(&data);
                 self.available_stream_ids = stream_ids;
                 self.available_packet_types = packet_types;
+
+                // Compute packet correlation data
+                let correlation = PacketCorrelation::from_qlog(&data);
+                info!(
+                    "Computed correlation: {} sent packets, {} lost, {} reorderings, {} time gaps, {} congestion states",
+                    correlation.sent_packets.len(),
+                    correlation.lost_packets.len(),
+                    correlation.reorderings.len(),
+                    correlation.time_gaps.len(),
+                    correlation.congestion_states.len()
+                );
+
+                // Update stats view
+                self.stats_view.update_stats(&data, &correlation);
+
+                self.packet_correlation = Some(correlation);
                 self.qlog_data = Some(data);
                 self.loading = false;
                 self.filter_stream_id = None;
