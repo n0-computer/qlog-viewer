@@ -12,6 +12,15 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use tracing::{error, info};
 
+pub struct LoadedFile {
+    pub path: PathBuf,
+    pub label: String,
+    pub qlog_data: QlogData,
+    pub packet_correlation: PacketCorrelation,
+    pub stream_ids: Vec<u64>,
+    pub packet_types: Vec<String>,
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum ViewMode {
     EventList,
@@ -29,17 +38,14 @@ struct EventListFilterOptions<'a> {
 }
 
 pub struct QlogViewerApp {
-    loaded_file: Option<PathBuf>,
-    qlog_data: Option<QlogData>,
-    packet_correlation: Option<PacketCorrelation>,
+    loaded_files: Vec<LoadedFile>,
+    selected_file_idx: usize,
     loading: bool,
     error_message: Option<String>,
     selected_event_idx: Option<usize>,
     filter_text: String,
     filter_stream_id: Option<u64>,
     filter_packet_type: Option<String>,
-    available_stream_ids: Vec<u64>,
-    available_packet_types: Vec<String>,
     show_event_detail: bool,
     view_mode: ViewMode,
     sequence_diagram: SequenceDiagram,
@@ -52,17 +58,14 @@ pub struct QlogViewerApp {
 impl QlogViewerApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self {
-            loaded_file: None,
-            qlog_data: None,
-            packet_correlation: None,
+            loaded_files: Vec::new(),
+            selected_file_idx: 0,
             loading: false,
             error_message: None,
             selected_event_idx: None,
             filter_text: String::new(),
             filter_stream_id: None,
             filter_packet_type: None,
-            available_stream_ids: Vec::new(),
-            available_packet_types: Vec::new(),
             show_event_detail: true,
             view_mode: ViewMode::EventList,
             sequence_diagram: SequenceDiagram::new(),
@@ -73,19 +76,50 @@ impl QlogViewerApp {
         }
     }
 
+    fn selected_file(&self) -> Option<&LoadedFile> {
+        self.loaded_files.get(self.selected_file_idx)
+    }
+
     fn render_menu_bar(&mut self, ctx: &Context) {
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
+                        if let Some(paths) = rfd::FileDialog::new()
                             .add_filter("qlog files", &["qlog", "json", "sqlog"])
-                            .pick_file()
+                            .pick_files()
                         {
-                            self.load_file(path);
+                            for path in paths {
+                                self.load_file(path);
+                            }
                         }
                         ui.close();
                     }
+
+                    if !self.loaded_files.is_empty() {
+                        ui.separator();
+                        ui.menu_button("Close File", |ui| {
+                            let mut file_to_close = None;
+                            for (idx, file) in self.loaded_files.iter().enumerate() {
+                                if ui.button(&file.label).clicked() {
+                                    file_to_close = Some(idx);
+                                    ui.close();
+                                }
+                            }
+                            if let Some(idx) = file_to_close {
+                                self.close_file(idx);
+                            }
+                        });
+                        if ui.button("Close All").clicked() {
+                            self.loaded_files.clear();
+                            self.selected_file_idx = 0;
+                            self.selected_event_idx = None;
+                            self.sequence_diagram.invalidate_cache();
+                            self.packetization_diagram.invalidate_cache();
+                            ui.close();
+                        }
+                    }
+
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -138,16 +172,59 @@ impl QlogViewerApp {
 
                 ui.separator();
 
-                if let Some(file_path) = &self.loaded_file {
-                    ui.label(format!("📁 {}", file_path.display()));
+                if self.loaded_files.len() > 1 && self.view_mode != ViewMode::SequenceDiagram {
+                    ui.label("File:");
+                    let current_label = self
+                        .selected_file()
+                        .map(|f| f.label.as_str())
+                        .unwrap_or("None");
+                    egui::ComboBox::from_id_salt("file_selector")
+                        .selected_text(current_label)
+                        .show_ui(ui, |ui| {
+                            for (idx, file) in self.loaded_files.iter().enumerate() {
+                                let selected = self.selected_file_idx == idx;
+                                if ui.selectable_label(selected, &file.label).clicked() {
+                                    self.selected_file_idx = idx;
+                                    self.selected_event_idx = None;
+                                    self.sequence_diagram.invalidate_cache();
+                                    self.packetization_diagram.invalidate_cache();
+                                    self.stats_view
+                                        .update_stats(&file.qlog_data, &file.packet_correlation);
+                                }
+                            }
+                        });
+                    ui.separator();
                 }
 
-                if let Some(data) = &self.qlog_data {
+                if let Some(file) = self.selected_file() {
+                    ui.label(format!("📁 {}", file.path.display()));
                     ui.separator();
-                    ui.label(format!("Events: {}", data.events.len()));
+                    ui.label(format!("Events: {}", file.qlog_data.events.len()));
+                }
+
+                if self.loaded_files.len() > 1 {
+                    ui.separator();
+                    ui.label(format!("{} files loaded", self.loaded_files.len()));
                 }
             });
         });
+    }
+
+    fn close_file(&mut self, idx: usize) {
+        if idx < self.loaded_files.len() {
+            self.loaded_files.remove(idx);
+            if self.selected_file_idx >= self.loaded_files.len() && !self.loaded_files.is_empty() {
+                self.selected_file_idx = self.loaded_files.len() - 1;
+            }
+            self.selected_event_idx = None;
+            self.sequence_diagram.invalidate_cache();
+            self.packetization_diagram.invalidate_cache();
+            if !self.loaded_files.is_empty() {
+                let file = &self.loaded_files[self.selected_file_idx];
+                self.stats_view
+                    .update_stats(&file.qlog_data, &file.packet_correlation);
+            }
+        }
     }
 
     fn render_main_content(&mut self, ctx: &Context) {
@@ -167,66 +244,74 @@ impl QlogViewerApp {
                 return;
             }
 
-            match &self.qlog_data {
-                Some(data) => match self.view_mode {
-                    ViewMode::EventList => {
-                        let mut filter_text = self.filter_text.clone();
-                        let mut filter_stream_id = self.filter_stream_id;
-                        let mut filter_packet_type = self.filter_packet_type.clone();
-                        let mut selected = self.selected_event_idx;
+            if self.loaded_files.is_empty() {
+                ui.centered_and_justified(|ui| {
+                    ui.label("No file loaded. Use File → Open to load a qlog file.");
+                });
+                return;
+            }
 
-                        Self::render_event_list_static(
+            let file = &self.loaded_files[self.selected_file_idx];
+            let data = &file.qlog_data;
+            let correlation = &file.packet_correlation;
+            let stream_ids = file.stream_ids.clone();
+            let packet_types = file.packet_types.clone();
+
+            match self.view_mode {
+                ViewMode::EventList => {
+                    let mut filter_text = self.filter_text.clone();
+                    let mut filter_stream_id = self.filter_stream_id;
+                    let mut filter_packet_type = self.filter_packet_type.clone();
+                    let mut selected = self.selected_event_idx;
+
+                    Self::render_event_list_static(
+                        ui,
+                        data,
+                        &mut filter_text,
+                        &mut filter_stream_id,
+                        &mut filter_packet_type,
+                        &mut selected,
+                        EventListFilterOptions {
+                            available_stream_ids: &stream_ids,
+                            available_packet_types: &packet_types,
+                        },
+                    );
+
+                    self.filter_text = filter_text;
+                    self.filter_stream_id = filter_stream_id;
+                    self.filter_packet_type = filter_packet_type;
+                    self.selected_event_idx = selected;
+                }
+                ViewMode::SequenceDiagram => {
+                    if self.loaded_files.len() >= 2 {
+                        self.sequence_diagram.show_dual(
+                            ui,
+                            &self.loaded_files[0],
+                            &self.loaded_files[1],
+                            &mut self.selected_event_idx,
+                            &mut self.selected_file_idx,
+                        );
+                    } else {
+                        self.sequence_diagram.show(
                             ui,
                             data,
-                            &mut filter_text,
-                            &mut filter_stream_id,
-                            &mut filter_packet_type,
-                            &mut selected,
-                            EventListFilterOptions {
-                                available_stream_ids: &self.available_stream_ids,
-                                available_packet_types: &self.available_packet_types,
-                            },
+                            correlation,
+                            &mut self.selected_event_idx,
                         );
-
-                        self.filter_text = filter_text;
-                        self.filter_stream_id = filter_stream_id;
-                        self.filter_packet_type = filter_packet_type;
-                        self.selected_event_idx = selected;
                     }
-                    ViewMode::SequenceDiagram => {
-                        if let Some(ref correlation) = self.packet_correlation {
-                            self.sequence_diagram.show(
-                                ui,
-                                data,
-                                correlation,
-                                &mut self.selected_event_idx,
-                            );
-                        } else {
-                            ui.label("Loading correlation data...");
-                        }
-                    }
-                    ViewMode::CongestionGraph => {
-                        if let Some(ref correlation) = self.packet_correlation {
-                            self.congestion_graph.show(ui, data, correlation);
-                        } else {
-                            ui.label("Loading correlation data...");
-                        }
-                    }
-                    ViewMode::MultiplexingDiagram => {
-                        self.multiplexing_diagram.show(ui, data);
-                    }
-                    ViewMode::PacketizationDiagram => {
-                        self.packetization_diagram
-                            .show(ui, data, &mut self.selected_event_idx);
-                    }
-                    ViewMode::StatsView => {
-                        self.stats_view.show(ui);
-                    }
-                },
-                None => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("No file loaded. Use File → Open to load a qlog file.");
-                    });
+                }
+                ViewMode::CongestionGraph => {
+                    self.congestion_graph.show(ui, data, correlation);
+                }
+                ViewMode::MultiplexingDiagram => {
+                    self.multiplexing_diagram.show(ui, data);
+                }
+                ViewMode::PacketizationDiagram => {
+                    self.packetization_diagram
+                        .show(ui, data, &mut self.selected_event_idx);
+                }
+                ViewMode::StatsView => {
+                    self.stats_view.show(ui);
                 }
             }
         });
@@ -403,13 +488,54 @@ impl QlogViewerApp {
                 ui.heading("Event Details");
                 ui.separator();
 
-                if let Some(data) = &self.qlog_data {
+                if let Some(file) = self.selected_file() {
+                    let data = &file.qlog_data;
                     if let Some(idx) = self.selected_event_idx {
                         if let Some(event) = data.events.get(idx) {
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 ui.label(format!("Event #{}", idx));
                                 ui.label(format!("Time: {}", data.format_time(event)));
                                 ui.label(format!("Name: {}", data.get_event_name(event)));
+
+                                // Check if this is a lost packet in dual-file mode
+                                if self.view_mode == ViewMode::SequenceDiagram
+                                    && self.loaded_files.len() >= 2
+                                {
+                                    if let EventData::PacketSent(sent_data) = &event.data {
+                                        if let Some(pn) = sent_data.header.packet_number {
+                                            // Check if received in the other file
+                                            let other_file_idx =
+                                                if self.selected_file_idx == 0 { 1 } else { 0 };
+                                            if let Some(other_file) =
+                                                self.loaded_files.get(other_file_idx)
+                                            {
+                                                let received =
+                                                    other_file.qlog_data.events.iter().any(|e| {
+                                                        if let EventData::PacketReceived(recv) =
+                                                            &e.data
+                                                        {
+                                                            recv.header.packet_number == Some(pn)
+                                                        } else {
+                                                            false
+                                                        }
+                                                    });
+                                                if !received {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new("⚠ LOST")
+                                                                .color(egui::Color32::RED)
+                                                                .strong(),
+                                                        );
+                                                        ui.label(
+                                                            "(not received by other endpoint)",
+                                                        );
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 ui.separator();
 
                                 ui.label("Raw JSON:");
@@ -452,16 +578,11 @@ impl QlogViewerApp {
         info!("Loading file: {:?}", path);
         self.loading = true;
         self.error_message = None;
-        self.loaded_file = Some(path.clone());
 
         match QlogData::from_file(&path) {
             Ok(data) => {
                 info!("Successfully loaded {} events", data.events.len());
                 let (stream_ids, packet_types) = Self::extract_filter_options(&data);
-                self.available_stream_ids = stream_ids;
-                self.available_packet_types = packet_types;
-
-                // Compute packet correlation data
                 let correlation = PacketCorrelation::from_qlog(&data);
                 info!(
                     "Computed correlation: {} sent packets, {} lost, {} reorderings, {} time gaps, {} congestion states",
@@ -472,15 +593,31 @@ impl QlogViewerApp {
                     correlation.congestion_states.len()
                 );
 
-                // Update stats view
-                self.stats_view.update_stats(&data, &correlation);
+                let file_num = self.loaded_files.len() + 1;
+                let label = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("File {}", file_num));
 
-                self.packet_correlation = Some(correlation);
-                self.qlog_data = Some(data);
+                let loaded_file = LoadedFile {
+                    path,
+                    label,
+                    qlog_data: data,
+                    packet_correlation: correlation,
+                    stream_ids,
+                    packet_types,
+                };
+
+                self.stats_view
+                    .update_stats(&loaded_file.qlog_data, &loaded_file.packet_correlation);
+
+                self.loaded_files.push(loaded_file);
+                self.selected_file_idx = self.loaded_files.len() - 1;
                 self.loading = false;
                 self.filter_stream_id = None;
                 self.filter_packet_type = None;
                 self.filter_text.clear();
+                self.selected_event_idx = None;
                 self.sequence_diagram.invalidate_cache();
                 self.packetization_diagram.invalidate_cache();
             }
