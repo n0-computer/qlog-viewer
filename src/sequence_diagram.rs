@@ -2,7 +2,7 @@ use crate::app::LoadedFile;
 use crate::packet_correlation::PacketCorrelation;
 use crate::qlog_data::QlogData;
 use crate::utils::{self, FrameType};
-use egui::{Color32, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Color32, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
 use qlog::events::EventData;
 use std::collections::{BTreeSet, HashMap};
 
@@ -27,6 +27,24 @@ pub struct SequenceDiagram {
     show_reordering: bool,
     show_rtt: bool,
     dual_time_scale: f32,
+}
+
+struct DualArrow {
+    send_time: f64,
+    recv_time: f64,
+    from_left: bool,
+    packet_type_short: String,
+    packet_number: u64,
+    frames: Vec<FrameType>,
+    is_lost: bool,
+    event_idx: usize,
+}
+
+struct DiagramLayout {
+    left_x: f32,
+    right_x: f32,
+    top_y: f32,
+    rect: Rect,
 }
 
 impl SequenceDiagram {
@@ -62,23 +80,71 @@ impl SequenceDiagram {
         correlation: &PacketCorrelation,
         selected_event_idx: &mut Option<usize>,
     ) {
-        if !self.cache_valid {
-            let extracted = Self::extract_packets(qlog_data);
-            self.cached_packets = extracted.packets;
-            self.available_stream_ids = extracted.stream_ids.into_iter().collect();
-            self.available_packet_types = extracted.packet_types.into_iter().collect();
-            self.cache_valid = true;
-        }
+        self.ensure_cache(qlog_data);
 
         if self.cached_packets.is_empty() {
             ui.label("No packet events found in qlog");
             return;
         }
 
-        ui.horizontal(|ui| {
-            ui.heading("Sequence Diagram");
-        });
+        ui.horizontal(|ui| ui.heading("Sequence Diagram"));
+        self.render_filter_controls(ui, correlation);
 
+        let filtered_indices = self.filter_packet_indices();
+        self.render_packet_stats(ui, &filtered_indices);
+
+        if filtered_indices.is_empty() {
+            ui.label("No packets match the current filters");
+            return;
+        }
+
+        self.render_single_file_diagram(ui, &filtered_indices, correlation, selected_event_idx);
+    }
+
+    pub fn show_dual(
+        &mut self,
+        ui: &mut egui::Ui,
+        left_file: &LoadedFile,
+        right_file: &LoadedFile,
+        selected_event_idx: &mut Option<usize>,
+        selected_file_idx: &mut usize,
+    ) {
+        let arrows = Self::build_dual_arrows(left_file, right_file);
+
+        if arrows.is_empty() {
+            ui.label("No packet events found in either file");
+            return;
+        }
+
+        ui.horizontal(|ui| ui.heading("Sequence Diagram (Dual File)"));
+
+        let (min_time, max_time, time_range) = Self::compute_time_bounds(&arrows);
+        self.render_dual_controls(ui, &arrows, min_time, max_time, time_range);
+
+        self.render_dual_file_diagram(
+            ui,
+            &arrows,
+            left_file,
+            right_file,
+            min_time,
+            time_range,
+            selected_event_idx,
+            selected_file_idx,
+        );
+    }
+
+    fn ensure_cache(&mut self, qlog_data: &QlogData) {
+        if self.cache_valid {
+            return;
+        }
+        let extracted = Self::extract_packets(qlog_data);
+        self.cached_packets = extracted.packets;
+        self.available_stream_ids = extracted.stream_ids.into_iter().collect();
+        self.available_packet_types = extracted.packet_types.into_iter().collect();
+        self.cache_valid = true;
+    }
+
+    fn render_filter_controls(&mut self, ui: &mut egui::Ui, correlation: &PacketCorrelation) {
         ui.horizontal(|ui| {
             ui.label("Packet Type:");
             let current_type_label = self.filter_packet_type.as_deref().unwrap_or("All");
@@ -100,7 +166,6 @@ impl SequenceDiagram {
                 });
 
             ui.separator();
-
             ui.label("Stream ID:");
             let current_stream_label = self
                 .filter_stream_id
@@ -127,7 +192,6 @@ impl SequenceDiagram {
                 });
 
             ui.separator();
-
             if ui.button("Clear Filters").clicked() {
                 self.filter_packet_type = None;
                 self.filter_stream_id = None;
@@ -147,11 +211,13 @@ impl SequenceDiagram {
             ui.checkbox(&mut self.show_rtt, "Show RTT");
         });
         ui.separator();
+    }
 
-        let filtered_packets: Vec<&PacketInfo> = self
-            .cached_packets
+    fn filter_packet_indices(&self) -> Vec<usize> {
+        self.cached_packets
             .iter()
-            .filter(|p| {
+            .enumerate()
+            .filter(|(_, p)| {
                 let type_match = self
                     .filter_packet_type
                     .as_ref()
@@ -163,16 +229,25 @@ impl SequenceDiagram {
                     .unwrap_or(true);
                 type_match && stream_match
             })
-            .collect();
+            .map(|(i, _)| i)
+            .collect()
+    }
 
-        let min_time = filtered_packets.first().map(|p| p.time).unwrap_or(0.0);
-        let max_time = filtered_packets.last().map(|p| p.time).unwrap_or(1000.0);
+    fn render_packet_stats(&self, ui: &mut egui::Ui, filtered_indices: &[usize]) {
+        let min_time = filtered_indices
+            .first()
+            .map(|&i| self.cached_packets[i].time)
+            .unwrap_or(0.0);
+        let max_time = filtered_indices
+            .last()
+            .map(|&i| self.cached_packets[i].time)
+            .unwrap_or(1000.0);
         let total_time = max_time - min_time;
 
         ui.horizontal(|ui| {
             ui.label(format!(
                 "{} packets (of {}) | {:.0} - {:.0} ms ({:.1}s)",
-                filtered_packets.len(),
+                filtered_indices.len(),
                 self.cached_packets.len(),
                 min_time,
                 max_time,
@@ -180,339 +255,126 @@ impl SequenceDiagram {
             ));
         });
         ui.separator();
+    }
 
-        if filtered_packets.is_empty() {
-            ui.label("No packets match the current filters");
-            return;
-        }
-
-        let total_content_height = (filtered_packets.len() as f32 * PACKET_HEIGHT) + 100.0;
+    fn render_single_file_diagram(
+        &mut self,
+        ui: &mut egui::Ui,
+        filtered_indices: &[usize],
+        correlation: &PacketCorrelation,
+        selected_event_idx: &mut Option<usize>,
+    ) {
+        let total_content_height = (filtered_indices.len() as f32 * PACKET_HEIGHT) + 100.0;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_viewport(ui, |ui, viewport| {
                 let available_width = ui.available_width();
                 let desired_size = Vec2::new(available_width, total_content_height);
-
                 let (response, painter) =
                     ui.allocate_painter(desired_size, Sense::click_and_drag());
                 let rect = response.rect;
 
-                let visible_start_y = viewport.top();
-                let visible_end_y = viewport.bottom();
+                let layout = DiagramLayout {
+                    left_x: rect.left() + LEFT_MARGIN,
+                    right_x: rect.right() - RIGHT_MARGIN,
+                    top_y: rect.top() + HEADER_HEIGHT,
+                    rect,
+                };
 
-                let first_visible_idx = ((visible_start_y - HEADER_HEIGHT) / PACKET_HEIGHT)
-                    .floor()
-                    .max(0.0) as usize;
-                let first_visible_idx = first_visible_idx.saturating_sub(VISIBLE_BUFFER);
+                let (first_vis, last_vis) = Self::visible_range(viewport, filtered_indices.len());
 
-                let last_visible_idx = ((visible_end_y - HEADER_HEIGHT) / PACKET_HEIGHT)
-                    .ceil()
-                    .max(0.0) as usize;
-                let last_visible_idx =
-                    (last_visible_idx + VISIBLE_BUFFER).min(filtered_packets.len());
-
-                let client_x = rect.left() + LEFT_MARGIN;
-                let server_x = rect.right() - RIGHT_MARGIN;
-                let top_y = rect.top() + HEADER_HEIGHT;
-
-                let header_y = rect.top() + viewport.top() + 18.0;
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        Pos2::new(rect.left(), rect.top() + viewport.top()),
-                        Vec2::new(available_width, 40.0),
-                    ),
-                    0.0,
+                draw_header(
+                    &painter,
+                    &layout,
+                    viewport,
+                    available_width,
                     ui.style().visuals.panel_fill,
-                );
-                painter.text(
-                    Pos2::new(client_x, header_y),
-                    egui::Align2::CENTER_CENTER,
                     "Client",
-                    egui::FontId::proportional(16.0),
-                    Color32::WHITE,
-                );
-                painter.text(
-                    Pos2::new(server_x, header_y),
-                    egui::Align2::CENTER_CENTER,
                     "Server",
-                    egui::FontId::proportional(16.0),
+                    Color32::WHITE,
                     Color32::WHITE,
                 );
 
-                let timeline_top = (top_y + first_visible_idx as f32 * PACKET_HEIGHT).max(top_y);
-                let timeline_bottom = top_y + last_visible_idx as f32 * PACKET_HEIGHT;
-                painter.line_segment(
-                    [
-                        Pos2::new(client_x, timeline_top),
-                        Pos2::new(client_x, timeline_bottom),
-                    ],
-                    Stroke::new(2.0, Color32::GRAY),
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(server_x, timeline_top),
-                        Pos2::new(server_x, timeline_bottom),
-                    ],
-                    Stroke::new(2.0, Color32::GRAY),
-                );
+                draw_timelines(&painter, &layout, first_vis, last_vis);
 
-                for idx in first_visible_idx..last_visible_idx {
-                    if idx >= filtered_packets.len() {
+                for vis_idx in first_vis..last_vis {
+                    let Some(&pkt_idx) = filtered_indices.get(vis_idx) else {
                         break;
-                    }
-                    let packet = filtered_packets[idx];
-                    let y_start = top_y + (idx as f32 * PACKET_HEIGHT) + PACKET_HEIGHT / 2.0;
-
-                    let diagonal_offset = PACKET_HEIGHT * 0.4;
-
-                    let (start_x, end_x, y_end, color) = match packet.direction {
-                        PacketDirection::Sent => {
-                            (client_x, server_x, y_start + diagonal_offset, SENT_COLOR)
-                        }
-                        PacketDirection::Received => (
-                            server_x,
-                            client_x,
-                            y_start + diagonal_offset,
-                            RECEIVED_COLOR,
-                        ),
                     };
+                    let packet = &self.cached_packets[pkt_idx];
+                    let is_selected = self.selected_packet_idx == Some(vis_idx);
 
-                    let time_line_half_width = 20.0;
-                    painter.line_segment(
-                        [
-                            Pos2::new(start_x - time_line_half_width, y_start),
-                            Pos2::new(start_x + time_line_half_width, y_start),
-                        ],
-                        Stroke::new(1.5, color),
-                    );
-                    painter.line_segment(
-                        [
-                            Pos2::new(end_x - time_line_half_width, y_end),
-                            Pos2::new(end_x + time_line_half_width, y_end),
-                        ],
-                        Stroke::new(1.5, color),
+                    let arrow_rect = draw_single_packet(
+                        &painter,
+                        &layout,
+                        packet,
+                        vis_idx,
+                        is_selected,
+                        self.show_loss_markers,
+                        self.show_rtt,
+                        correlation,
                     );
 
-                    painter.line_segment(
-                        [Pos2::new(start_x, y_start), Pos2::new(end_x, y_end)],
-                        Stroke::new(2.0, color),
-                    );
-
-                    painter.circle_filled(Pos2::new(start_x, y_start), 4.0, color);
-                    painter.circle_filled(Pos2::new(end_x, y_end), 4.0, color);
-
-                    painter.text(
-                        Pos2::new(rect.left() + 8.0, y_start),
-                        egui::Align2::LEFT_CENTER,
-                        format!("{:.2}", packet.time),
-                        egui::FontId::proportional(11.0),
-                        Color32::GRAY,
-                    );
-
-                    let mid_x = (start_x + end_x) / 2.0;
-                    let mid_y = (y_start + y_end) / 2.0;
-                    let frames_to_show: Vec<&FrameType> = packet.frames.iter().take(4).collect();
-                    let tag_width = 38.0;
-                    let tag_gap = 2.0;
-                    let total_tags_width = frames_to_show.len() as f32 * (tag_width + tag_gap);
-                    let tag_start_x = mid_x - total_tags_width / 2.0;
-
-                    for (fi, frame) in frames_to_show.iter().enumerate() {
-                        let tag_x = tag_start_x + (fi as f32 * (tag_width + tag_gap));
-                        let tag_rect = Rect::from_min_size(
-                            Pos2::new(tag_x, mid_y - 10.0),
-                            Vec2::new(tag_width, 14.0),
-                        );
-                        painter.rect_filled(tag_rect, 2.0, frame.color());
-                        painter.text(
-                            tag_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            frame.short_name(),
-                            egui::FontId::proportional(9.0),
-                            Color32::WHITE,
-                        );
-                    }
-
-                    painter.text(
-                        Pos2::new(rect.right() - 10.0, y_end),
-                        egui::Align2::RIGHT_CENTER,
-                        format!("{:.2}", packet.time),
-                        egui::FontId::proportional(11.0),
-                        Color32::GRAY,
-                    );
-
-                    let info_x = if start_x < end_x {
-                        end_x + 8.0
-                    } else {
-                        start_x + 8.0
-                    };
-                    painter.text(
-                        Pos2::new(info_x, (y_start + y_end) / 2.0),
-                        egui::Align2::LEFT_CENTER,
-                        format!("{}:{}", packet.packet_type_short, packet.packet_number),
-                        egui::FontId::proportional(10.0),
-                        Color32::LIGHT_GRAY,
-                    );
-
-                    let arrow_rect = Rect::from_two_pos(
-                        Pos2::new(start_x.min(end_x) - 5.0, y_start.min(y_end) - 12.0),
-                        Pos2::new(start_x.max(end_x) + 5.0, y_start.max(y_end) + 12.0),
-                    );
                     if response.clicked() {
                         if let Some(pos) = response.interact_pointer_pos() {
                             if arrow_rect.contains(pos) {
-                                self.selected_packet_idx = Some(idx);
+                                self.selected_packet_idx = Some(vis_idx);
                                 *selected_event_idx = Some(packet.event_idx);
                             }
-                        }
-                    }
-
-                    if self.selected_packet_idx == Some(idx) {
-                        painter.rect_stroke(
-                            arrow_rect,
-                            2.0,
-                            Stroke::new(2.0, Color32::YELLOW),
-                            StrokeKind::Inside,
-                        );
-                    }
-
-                    if self.show_loss_markers
-                        && packet.direction == PacketDirection::Sent
-                        && correlation.is_packet_lost(packet.packet_number)
-                    {
-                        draw_loss_marker(&painter, Pos2::new(mid_x, mid_y + 18.0), 14.0);
-                    }
-
-                    if self.show_rtt && packet.direction == PacketDirection::Sent {
-                        if let Some(rtt) = correlation.get_rtt(packet.packet_number) {
-                            let rtt_text = format!("{:.1}ms", rtt);
-                            painter.text(
-                                Pos2::new(mid_x + 5.0, y_start - 2.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                rtt_text,
-                                egui::FontId::proportional(9.0),
-                                Color32::from_rgb(100, 200, 100),
-                            );
                         }
                     }
                 }
 
                 if self.show_reordering {
-                    let visible_start = filtered_packets
-                        .get(first_visible_idx)
-                        .map(|p| p.time as f32)
-                        .unwrap_or(0.0);
-                    let visible_end = filtered_packets
-                        .get(last_visible_idx.saturating_sub(1))
-                        .map(|p| p.time as f32)
-                        .unwrap_or(f32::MAX);
-
-                    let pn_to_y: HashMap<u64, f32> = (first_visible_idx..last_visible_idx)
-                        .filter_map(|idx| filtered_packets.get(idx))
-                        .filter(|p| p.direction == PacketDirection::Received)
-                        .enumerate()
-                        .map(|(i, p)| {
-                            (
-                                p.packet_number,
-                                top_y
-                                    + (first_visible_idx + i) as f32 * PACKET_HEIGHT
-                                    + PACKET_HEIGHT / 2.0,
-                            )
-                        })
-                        .collect();
-
-                    let reorder_color = Color32::from_rgb(255, 140, 0);
-                    let line_x = server_x + 15.0;
-
-                    for reorder in correlation.visible_reorderings(visible_start, visible_end, 50) {
-                        let (Some(&y1), Some(&y2)) = (
-                            pn_to_y.get(&reorder.earlier_pn),
-                            pn_to_y.get(&reorder.later_pn),
-                        ) else {
-                            continue;
-                        };
-
-                        painter.line_segment(
-                            [Pos2::new(line_x, y1), Pos2::new(line_x, y2)],
-                            Stroke::new(2.0, reorder_color),
-                        );
-                        painter.circle_filled(Pos2::new(line_x, y1), 5.0, reorder_color);
-                        painter.circle_filled(Pos2::new(line_x, y2), 5.0, reorder_color);
-
-                        for (y, pn) in [(y1, reorder.earlier_pn), (y2, reorder.later_pn)] {
-                            painter.text(
-                                Pos2::new(line_x + 8.0, y),
-                                egui::Align2::LEFT_CENTER,
-                                format!("#{pn}"),
-                                egui::FontId::proportional(9.0),
-                                reorder_color,
-                            );
-                        }
-                    }
+                    draw_reordering(
+                        &painter,
+                        &layout,
+                        &self.cached_packets,
+                        filtered_indices,
+                        first_vis,
+                        last_vis,
+                        correlation,
+                    );
                 }
 
-                let current_packet = first_visible_idx + VISIBLE_BUFFER;
-                let progress = current_packet as f32 / filtered_packets.len() as f32 * 100.0;
-                painter.text(
-                    Pos2::new(rect.right() - 10.0, rect.top() + viewport.top() + 25.0),
-                    egui::Align2::RIGHT_CENTER,
-                    format!(
-                        "#{} ({:.0}%)",
-                        current_packet.min(filtered_packets.len()),
-                        progress
-                    ),
-                    egui::FontId::proportional(10.0),
-                    Color32::GRAY,
+                draw_progress_indicator(
+                    &painter,
+                    &layout,
+                    viewport,
+                    first_vis,
+                    filtered_indices.len(),
                 );
             });
     }
 
-    pub fn show_dual(
-        &mut self,
-        ui: &mut egui::Ui,
-        left_file: &LoadedFile,
-        right_file: &LoadedFile,
-        selected_event_idx: &mut Option<usize>,
-        selected_file_idx: &mut usize,
-    ) {
+    fn build_dual_arrows(left_file: &LoadedFile, right_file: &LoadedFile) -> Vec<DualArrow> {
         let left_packets = Self::extract_packets(&left_file.qlog_data).packets;
         let right_packets = Self::extract_packets(&right_file.qlog_data).packets;
 
-        let left_recv_times: HashMap<u64, f64> = left_packets
-            .iter()
-            .filter(|p| p.direction == PacketDirection::Received)
-            .map(|p| (p.packet_number, p.time))
-            .collect();
-        let right_recv_times: HashMap<u64, f64> = right_packets
-            .iter()
-            .filter(|p| p.direction == PacketDirection::Received)
-            .map(|p| (p.packet_number, p.time))
-            .collect();
+        let recv_times = |packets: &[PacketInfo]| -> HashMap<u64, f64> {
+            packets
+                .iter()
+                .filter(|p| p.direction == PacketDirection::Received)
+                .map(|p| (p.packet_number, p.time))
+                .collect()
+        };
 
-        struct Arrow {
-            send_time: f64,
-            recv_time: f64,
-            from_left: bool,
-            packet_type_short: String,
-            packet_number: u64,
-            frames: Vec<FrameType>,
-            is_lost: bool,
-            event_idx: usize,
-        }
+        let left_recv = recv_times(&left_packets);
+        let right_recv = recv_times(&right_packets);
 
-        let mut arrows: Vec<Arrow> = Vec::new();
+        let mut arrows: Vec<DualArrow> = Vec::new();
 
         for (packets, recv_times, from_left) in [
-            (&left_packets, &right_recv_times, true),
-            (&right_packets, &left_recv_times, false),
+            (&left_packets, &right_recv, true),
+            (&right_packets, &left_recv, false),
         ] {
             for p in packets
                 .iter()
                 .filter(|p| p.direction == PacketDirection::Sent)
             {
                 let recv_time = recv_times.get(&p.packet_number).copied();
-                arrows.push(Arrow {
+                arrows.push(DualArrow {
                     send_time: p.time,
                     recv_time: recv_time.unwrap_or(p.time),
                     from_left,
@@ -531,17 +393,10 @@ impl SequenceDiagram {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        if arrows.is_empty() {
-            ui.label("No packet events found in either file");
-            return;
-        }
+        arrows
+    }
 
-        ui.horizontal(|ui| {
-            ui.heading("Sequence Diagram (Dual File)");
-        });
-
-        let total_loss_count = arrows.iter().filter(|a| a.is_lost).count();
-
+    fn compute_time_bounds(arrows: &[DualArrow]) -> (f64, f64, f64) {
         let min_time = arrows
             .iter()
             .map(|a| a.send_time.min(a.recv_time))
@@ -551,6 +406,18 @@ impl SequenceDiagram {
             .map(|a| a.send_time.max(a.recv_time))
             .fold(f64::MIN, f64::max);
         let time_range = (max_time - min_time).max(1.0);
+        (min_time, max_time, time_range)
+    }
+
+    fn render_dual_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        arrows: &[DualArrow],
+        min_time: f64,
+        max_time: f64,
+        time_range: f64,
+    ) {
+        let total_loss_count = arrows.iter().filter(|a| a.is_lost).count();
 
         ui.horizontal(|ui| {
             ui.label(format!(
@@ -576,7 +443,20 @@ impl SequenceDiagram {
             );
         });
         ui.separator();
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_dual_file_diagram(
+        &mut self,
+        ui: &mut egui::Ui,
+        arrows: &[DualArrow],
+        left_file: &LoadedFile,
+        right_file: &LoadedFile,
+        min_time: f64,
+        time_range: f64,
+        selected_event_idx: &mut Option<usize>,
+        selected_file_idx: &mut usize,
+    ) {
         let pixels_per_ms = self.dual_time_scale;
         let total_content_height = (time_range as f32 * pixels_per_ms) + 100.0;
 
@@ -585,292 +465,292 @@ impl SequenceDiagram {
             .show_viewport(ui, |ui, viewport| {
                 let available_width = ui.available_width();
                 let desired_size = Vec2::new(available_width, total_content_height);
-
                 let (response, painter) =
                     ui.allocate_painter(desired_size, Sense::click_and_drag());
                 let rect = response.rect;
 
-                let top_y_offset = 40.0;
-                let left_margin = 60.0;
-                let right_margin = 20.0;
-                let left_x = rect.left() + left_margin;
-                let right_x = rect.right() - right_margin;
-                let top_y = rect.top() + top_y_offset;
+                let layout = DiagramLayout {
+                    left_x: rect.left() + 60.0,
+                    right_x: rect.right() - 20.0,
+                    top_y: rect.top() + 40.0,
+                    rect,
+                };
 
-                let time_to_y = |t: f64| -> f32 { top_y + ((t - min_time) as f32 * pixels_per_ms) };
+                let time_to_y =
+                    |t: f64| -> f32 { layout.top_y + ((t - min_time) as f32 * pixels_per_ms) };
 
-                let header_y = rect.top() + viewport.top() + 18.0;
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        Pos2::new(rect.left(), rect.top() + viewport.top()),
-                        Vec2::new(available_width, 40.0),
-                    ),
-                    0.0,
+                draw_header(
+                    &painter,
+                    &layout,
+                    viewport,
+                    available_width,
                     ui.style().visuals.panel_fill,
-                );
-                painter.text(
-                    Pos2::new(left_x, header_y),
-                    egui::Align2::CENTER_CENTER,
                     &left_file.label,
-                    egui::FontId::proportional(14.0),
-                    Color32::from_rgb(0, 150, 255),
-                );
-                painter.text(
-                    Pos2::new(right_x, header_y),
-                    egui::Align2::CENTER_CENTER,
                     &right_file.label,
-                    egui::FontId::proportional(14.0),
-                    Color32::from_rgb(220, 80, 80),
+                    SENT_COLOR,
+                    RECEIVED_COLOR,
                 );
 
                 let visible_start_time =
-                    min_time + ((viewport.top() - top_y_offset).max(0.0) / pixels_per_ms) as f64;
+                    min_time + ((viewport.top() - 40.0).max(0.0) / pixels_per_ms) as f64;
                 let visible_end_time =
-                    min_time + ((viewport.bottom() - top_y_offset) / pixels_per_ms) as f64;
+                    min_time + ((viewport.bottom() - 40.0) / pixels_per_ms) as f64;
 
-                let timeline_top = time_to_y(visible_start_time.max(min_time));
-                let timeline_bottom = time_to_y(visible_end_time.min(max_time));
-
-                painter.line_segment(
-                    [
-                        Pos2::new(left_x, timeline_top),
-                        Pos2::new(left_x, timeline_bottom),
-                    ],
-                    Stroke::new(2.0, Color32::GRAY),
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(right_x, timeline_top),
-                        Pos2::new(right_x, timeline_bottom),
-                    ],
-                    Stroke::new(2.0, Color32::GRAY),
+                draw_dual_timelines(
+                    &painter,
+                    &layout,
+                    time_to_y(visible_start_time.max(min_time)),
+                    time_to_y(visible_end_time.min(min_time + time_range)),
                 );
 
-                let time_step = if time_range > 1000.0 {
-                    100.0
-                } else if time_range > 100.0 {
-                    10.0
-                } else {
-                    1.0
-                };
-                let first_marker = (visible_start_time / time_step).floor() * time_step;
-                let mut marker_time = first_marker;
-                while marker_time <= visible_end_time {
-                    if marker_time >= min_time {
-                        let y = time_to_y(marker_time);
-                        painter.line_segment(
-                            [Pos2::new(left_x - 5.0, y), Pos2::new(left_x, y)],
-                            Stroke::new(1.0, Color32::DARK_GRAY),
-                        );
-                        painter.text(
-                            Pos2::new(rect.left() + 5.0, y),
-                            egui::Align2::LEFT_CENTER,
-                            format!("{:.1}", marker_time),
-                            egui::FontId::proportional(9.0),
-                            Color32::GRAY,
-                        );
-                    }
-                    marker_time += time_step;
-                }
+                draw_time_markers(
+                    &painter,
+                    &layout,
+                    time_range,
+                    min_time,
+                    visible_start_time,
+                    visible_end_time,
+                    &time_to_y,
+                );
 
-                let mut send_time_counts: HashMap<i64, usize> = HashMap::new();
-                let mut send_time_indices: HashMap<i64, usize> = HashMap::new();
-                for arrow in &arrows {
-                    let key = (arrow.send_time * 1000.0) as i64;
-                    *send_time_counts.entry(key).or_insert(0) += 1;
-                }
+                let send_time_counts = Self::count_simultaneous_sends(arrows);
+                let arrow_rects =
+                    self.draw_dual_arrows(&painter, &layout, arrows, &send_time_counts, &time_to_y);
 
-                let mut arrow_rects: Vec<(usize, usize, bool, Rect)> = Vec::new();
-                for (arrow_idx, arrow) in arrows.iter().enumerate() {
-                    let y_send = time_to_y(arrow.send_time);
-                    let y_recv = time_to_y(arrow.recv_time);
+                self.handle_dual_selection(
+                    ui,
+                    &response,
+                    &arrow_rects,
+                    selected_event_idx,
+                    selected_file_idx,
+                );
 
-                    let (start_x, end_x, color) = if arrow.from_left {
-                        (left_x, right_x, SENT_COLOR)
-                    } else {
-                        (right_x, left_x, RECEIVED_COLOR)
-                    };
+                self.draw_selection_indicator(&painter, &layout, viewport, arrow_rects.len());
 
-                    let time_key = (arrow.send_time * 1000.0) as i64;
-                    let count = *send_time_counts.get(&time_key).unwrap_or(&1);
-                    let idx = *send_time_indices.entry(time_key).or_insert(0);
-                    *send_time_indices.get_mut(&time_key).unwrap() += 1;
-
-                    let fan_offset = if count > 1 {
-                        (idx as f32 - (count as f32 - 1.0) / 2.0) * 3.0
-                    } else {
-                        0.0
-                    };
-
-                    let y_send_adjusted = y_send + fan_offset;
-
-                    let (actual_end_x, actual_end_y, is_truncated) =
-                        if self.show_loss_markers && arrow.is_lost {
-                            let mid_x = (start_x + end_x) / 2.0;
-                            let mid_y = (y_send_adjusted + y_recv) / 2.0;
-                            (mid_x, mid_y, true)
-                        } else {
-                            (end_x, y_recv, false)
-                        };
-
-                    let is_selected = self.selected_packet_idx == Some(arrow_idx);
-                    let line_color = if is_selected { Color32::YELLOW } else { color };
-                    let line_width = if is_selected { 3.0 } else { 1.5 };
-
-                    painter.line_segment(
-                        [
-                            Pos2::new(start_x, y_send_adjusted),
-                            Pos2::new(actual_end_x, actual_end_y),
-                        ],
-                        Stroke::new(line_width, line_color),
-                    );
-
-                    let marker_size = if is_selected { 5.0 } else { 3.0 };
-                    painter.circle_filled(
-                        Pos2::new(start_x, y_send_adjusted),
-                        marker_size,
-                        line_color,
-                    );
-                    if !is_truncated {
-                        painter.circle_filled(
-                            Pos2::new(actual_end_x, actual_end_y),
-                            marker_size,
-                            line_color,
-                        );
-                    }
-
-                    let tag_x_pos = (start_x + actual_end_x) / 2.0;
-                    let tag_y_pos = (y_send_adjusted + actual_end_y) / 2.0;
-                    let frames_to_show: Vec<&FrameType> = arrow.frames.iter().take(3).collect();
-                    let tag_width = 32.0;
-                    let tag_gap = 2.0;
-                    let total_tags_width = frames_to_show.len() as f32 * (tag_width + tag_gap);
-                    let tag_start_x = tag_x_pos - total_tags_width / 2.0;
-
-                    for (fi, frame) in frames_to_show.iter().enumerate() {
-                        let tag_x = tag_start_x + (fi as f32 * (tag_width + tag_gap));
-                        let tag_rect = Rect::from_min_size(
-                            Pos2::new(tag_x, tag_y_pos - 6.0),
-                            Vec2::new(tag_width, 12.0),
-                        );
-                        painter.rect_filled(tag_rect, 2.0, frame.color());
-                        painter.text(
-                            tag_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            frame.short_name(),
-                            egui::FontId::proportional(8.0),
-                            Color32::WHITE,
-                        );
-                    }
-
-                    let info_offset = if arrow.from_left { 5.0 } else { -5.0 };
-                    painter.text(
-                        Pos2::new(tag_x_pos + info_offset, tag_y_pos - 10.0),
-                        if arrow.from_left {
-                            egui::Align2::LEFT_BOTTOM
-                        } else {
-                            egui::Align2::RIGHT_BOTTOM
-                        },
-                        format!("{}:{}", arrow.packet_type_short, arrow.packet_number),
-                        egui::FontId::proportional(8.0),
-                        Color32::LIGHT_GRAY,
-                    );
-
-                    if is_truncated {
-                        draw_loss_marker(&painter, Pos2::new(actual_end_x, actual_end_y), 10.0);
-                    }
-
-                    if count > 1 && idx == 0 {
-                        let indicator_x = start_x + (if arrow.from_left { 8.0 } else { -8.0 });
-                        painter.text(
-                            Pos2::new(indicator_x, y_send),
-                            if arrow.from_left {
-                                egui::Align2::LEFT_CENTER
-                            } else {
-                                egui::Align2::RIGHT_CENTER
-                            },
-                            format!("×{}", count),
-                            egui::FontId::proportional(9.0),
-                            Color32::YELLOW,
-                        );
-                    }
-
-                    let arrow_rect = Rect::from_two_pos(
-                        Pos2::new(
-                            start_x.min(actual_end_x) - 5.0,
-                            y_send_adjusted.min(actual_end_y) - 12.0,
-                        ),
-                        Pos2::new(
-                            start_x.max(actual_end_x) + 5.0,
-                            y_send_adjusted.max(actual_end_y) + 12.0,
-                        ),
-                    );
-                    arrow_rects.push((arrow_idx, arrow.event_idx, arrow.from_left, arrow_rect));
-                }
-
-                let total_arrows = arrow_rects.len();
-
-                if response.clicked() {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        if let Some((idx, event_idx, from_left, _)) = arrow_rects
-                            .iter()
-                            .find(|(_, _, _, rect)| rect.contains(pos))
-                        {
-                            self.selected_packet_idx = Some(*idx);
-                            *selected_event_idx = Some(*event_idx);
-                            *selected_file_idx = if *from_left { 0 } else { 1 };
-                        }
-                    }
-                }
-
-                if total_arrows > 0 {
-                    let input = ui.input(|i| {
-                        (
-                            i.key_pressed(egui::Key::ArrowUp),
-                            i.key_pressed(egui::Key::ArrowDown),
-                        )
-                    });
-
-                    if input.0 || input.1 {
-                        let current_idx = self.selected_packet_idx.unwrap_or(0);
-                        let new_idx = if input.0 {
-                            current_idx.saturating_sub(1)
-                        } else {
-                            (current_idx + 1).min(total_arrows - 1)
-                        };
-
-                        if new_idx != current_idx || self.selected_packet_idx.is_none() {
-                            self.selected_packet_idx = Some(new_idx);
-                            if let Some((_, event_idx, from_left, _)) =
-                                arrow_rects.iter().find(|(idx, _, _, _)| *idx == new_idx)
-                            {
-                                *selected_event_idx = Some(*event_idx);
-                                *selected_file_idx = if *from_left { 0 } else { 1 };
-                            }
-                        }
-                    }
-
-                    if let Some(idx) = self.selected_packet_idx {
-                        painter.text(
-                            Pos2::new(rect.left() + 10.0, rect.top() + viewport.top() + 25.0),
-                            egui::Align2::LEFT_CENTER,
-                            format!("↑↓ arrow {} of {}", idx + 1, total_arrows),
-                            egui::FontId::proportional(11.0),
-                            Color32::YELLOW,
-                        );
-                    }
-                }
-
-                let visible_time_pct =
-                    ((visible_start_time - min_time) / time_range * 100.0) as f32;
-                painter.text(
-                    Pos2::new(rect.right() - 10.0, rect.top() + viewport.top() + 25.0),
-                    egui::Align2::RIGHT_CENTER,
-                    format!("{:.0}ms ({:.0}%)", visible_start_time, visible_time_pct),
-                    egui::FontId::proportional(10.0),
-                    Color32::GRAY,
+                draw_dual_progress(
+                    &painter,
+                    &layout,
+                    viewport,
+                    visible_start_time,
+                    time_range,
+                    min_time,
                 );
             });
+    }
+
+    fn count_simultaneous_sends(arrows: &[DualArrow]) -> HashMap<i64, usize> {
+        let mut counts: HashMap<i64, usize> = HashMap::new();
+        for arrow in arrows {
+            let key = (arrow.send_time * 1000.0) as i64;
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    fn draw_dual_arrows(
+        &self,
+        painter: &Painter,
+        layout: &DiagramLayout,
+        arrows: &[DualArrow],
+        send_time_counts: &HashMap<i64, usize>,
+        time_to_y: &impl Fn(f64) -> f32,
+    ) -> Vec<(usize, usize, bool, Rect)> {
+        let mut arrow_rects = Vec::new();
+        let mut send_time_indices: HashMap<i64, usize> = HashMap::new();
+
+        for (arrow_idx, arrow) in arrows.iter().enumerate() {
+            let y_send = time_to_y(arrow.send_time);
+            let y_recv = time_to_y(arrow.recv_time);
+
+            let (start_x, end_x, color) = if arrow.from_left {
+                (layout.left_x, layout.right_x, SENT_COLOR)
+            } else {
+                (layout.right_x, layout.left_x, RECEIVED_COLOR)
+            };
+
+            let time_key = (arrow.send_time * 1000.0) as i64;
+            let count = *send_time_counts.get(&time_key).unwrap_or(&1);
+            let idx = *send_time_indices.entry(time_key).or_insert(0);
+            *send_time_indices.get_mut(&time_key).unwrap() += 1;
+
+            let fan_offset = if count > 1 {
+                (idx as f32 - (count as f32 - 1.0) / 2.0) * 3.0
+            } else {
+                0.0
+            };
+            let y_send_adjusted = y_send + fan_offset;
+
+            let (actual_end_x, actual_end_y, is_truncated) =
+                if self.show_loss_markers && arrow.is_lost {
+                    let mid_x = (start_x + end_x) / 2.0;
+                    let mid_y = (y_send_adjusted + y_recv) / 2.0;
+                    (mid_x, mid_y, true)
+                } else {
+                    (end_x, y_recv, false)
+                };
+
+            let is_selected = self.selected_packet_idx == Some(arrow_idx);
+            let line_color = if is_selected { Color32::YELLOW } else { color };
+            let line_width = if is_selected { 3.0 } else { 1.5 };
+            let marker_size = if is_selected { 5.0 } else { 3.0 };
+
+            painter.line_segment(
+                [
+                    Pos2::new(start_x, y_send_adjusted),
+                    Pos2::new(actual_end_x, actual_end_y),
+                ],
+                Stroke::new(line_width, line_color),
+            );
+
+            painter.circle_filled(Pos2::new(start_x, y_send_adjusted), marker_size, line_color);
+            if !is_truncated {
+                painter.circle_filled(
+                    Pos2::new(actual_end_x, actual_end_y),
+                    marker_size,
+                    line_color,
+                );
+            }
+
+            let tag_x = (start_x + actual_end_x) / 2.0;
+            let tag_y = (y_send_adjusted + actual_end_y) / 2.0;
+
+            draw_frame_tags(painter, &arrow.frames, tag_x, tag_y, 32.0, 3);
+
+            let info_offset = if arrow.from_left { 5.0 } else { -5.0 };
+            painter.text(
+                Pos2::new(tag_x + info_offset, tag_y - 10.0),
+                if arrow.from_left {
+                    egui::Align2::LEFT_BOTTOM
+                } else {
+                    egui::Align2::RIGHT_BOTTOM
+                },
+                format!("{}:{}", arrow.packet_type_short, arrow.packet_number),
+                egui::FontId::proportional(8.0),
+                Color32::LIGHT_GRAY,
+            );
+
+            if is_truncated {
+                draw_loss_marker(painter, Pos2::new(actual_end_x, actual_end_y), 10.0);
+            }
+
+            if count > 1 && idx == 0 {
+                let indicator_x = start_x + (if arrow.from_left { 8.0 } else { -8.0 });
+                painter.text(
+                    Pos2::new(indicator_x, y_send),
+                    if arrow.from_left {
+                        egui::Align2::LEFT_CENTER
+                    } else {
+                        egui::Align2::RIGHT_CENTER
+                    },
+                    format!("x{}", count),
+                    egui::FontId::proportional(9.0),
+                    Color32::YELLOW,
+                );
+            }
+
+            let arrow_rect = Rect::from_two_pos(
+                Pos2::new(
+                    start_x.min(actual_end_x) - 5.0,
+                    y_send_adjusted.min(actual_end_y) - 12.0,
+                ),
+                Pos2::new(
+                    start_x.max(actual_end_x) + 5.0,
+                    y_send_adjusted.max(actual_end_y) + 12.0,
+                ),
+            );
+            arrow_rects.push((arrow_idx, arrow.event_idx, arrow.from_left, arrow_rect));
+        }
+
+        arrow_rects
+    }
+
+    fn handle_dual_selection(
+        &mut self,
+        ui: &egui::Ui,
+        response: &Response,
+        arrow_rects: &[(usize, usize, bool, Rect)],
+        selected_event_idx: &mut Option<usize>,
+        selected_file_idx: &mut usize,
+    ) {
+        let total_arrows = arrow_rects.len();
+
+        if response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if let Some((idx, event_idx, from_left, _)) = arrow_rects
+                    .iter()
+                    .find(|(_, _, _, rect)| rect.contains(pos))
+                {
+                    self.selected_packet_idx = Some(*idx);
+                    *selected_event_idx = Some(*event_idx);
+                    *selected_file_idx = if *from_left { 0 } else { 1 };
+                }
+            }
+        }
+
+        if total_arrows == 0 {
+            return;
+        }
+
+        let (up, down) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+            )
+        });
+
+        if up || down {
+            let current_idx = self.selected_packet_idx.unwrap_or(0);
+            let new_idx = if up {
+                current_idx.saturating_sub(1)
+            } else {
+                (current_idx + 1).min(total_arrows - 1)
+            };
+
+            if new_idx != current_idx || self.selected_packet_idx.is_none() {
+                self.selected_packet_idx = Some(new_idx);
+                if let Some((_, event_idx, from_left, _)) =
+                    arrow_rects.iter().find(|(idx, _, _, _)| *idx == new_idx)
+                {
+                    *selected_event_idx = Some(*event_idx);
+                    *selected_file_idx = if *from_left { 0 } else { 1 };
+                }
+            }
+        }
+    }
+
+    fn draw_selection_indicator(
+        &self,
+        painter: &Painter,
+        layout: &DiagramLayout,
+        viewport: Rect,
+        total_arrows: usize,
+    ) {
+        if let Some(idx) = self.selected_packet_idx {
+            painter.text(
+                Pos2::new(
+                    layout.rect.left() + 10.0,
+                    layout.rect.top() + viewport.top() + 25.0,
+                ),
+                egui::Align2::LEFT_CENTER,
+                format!("arrow {} of {}", idx + 1, total_arrows),
+                egui::FontId::proportional(11.0),
+                Color32::YELLOW,
+            );
+        }
+    }
+
+    fn visible_range(viewport: Rect, total_count: usize) -> (usize, usize) {
+        let first = ((viewport.top() - HEADER_HEIGHT) / PACKET_HEIGHT)
+            .floor()
+            .max(0.0) as usize;
+        let first = first.saturating_sub(VISIBLE_BUFFER);
+
+        let last = ((viewport.bottom() - HEADER_HEIGHT) / PACKET_HEIGHT)
+            .ceil()
+            .max(0.0) as usize;
+        let last = (last + VISIBLE_BUFFER).min(total_count);
+
+        (first, last)
     }
 
     fn extract_packets(qlog_data: &QlogData) -> ExtractedPackets {
@@ -922,6 +802,369 @@ impl SequenceDiagram {
         }
 
         result
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_header(
+    painter: &Painter,
+    layout: &DiagramLayout,
+    viewport: Rect,
+    width: f32,
+    fill: Color32,
+    left_label: &str,
+    right_label: &str,
+    left_color: Color32,
+    right_color: Color32,
+) {
+    let header_y = layout.rect.top() + viewport.top() + 18.0;
+    painter.rect_filled(
+        Rect::from_min_size(
+            Pos2::new(layout.rect.left(), layout.rect.top() + viewport.top()),
+            Vec2::new(width, 40.0),
+        ),
+        0.0,
+        fill,
+    );
+    painter.text(
+        Pos2::new(layout.left_x, header_y),
+        egui::Align2::CENTER_CENTER,
+        left_label,
+        egui::FontId::proportional(14.0),
+        left_color,
+    );
+    painter.text(
+        Pos2::new(layout.right_x, header_y),
+        egui::Align2::CENTER_CENTER,
+        right_label,
+        egui::FontId::proportional(14.0),
+        right_color,
+    );
+}
+
+fn draw_timelines(painter: &Painter, layout: &DiagramLayout, first_idx: usize, last_idx: usize) {
+    let top = (layout.top_y + first_idx as f32 * PACKET_HEIGHT).max(layout.top_y);
+    let bottom = layout.top_y + last_idx as f32 * PACKET_HEIGHT;
+
+    for x in [layout.left_x, layout.right_x] {
+        painter.line_segment(
+            [Pos2::new(x, top), Pos2::new(x, bottom)],
+            Stroke::new(2.0, Color32::GRAY),
+        );
+    }
+}
+
+fn draw_dual_timelines(painter: &Painter, layout: &DiagramLayout, top: f32, bottom: f32) {
+    for x in [layout.left_x, layout.right_x] {
+        painter.line_segment(
+            [Pos2::new(x, top), Pos2::new(x, bottom)],
+            Stroke::new(2.0, Color32::GRAY),
+        );
+    }
+}
+
+fn draw_time_ticks(
+    painter: &Painter,
+    start_x: f32,
+    y_start: f32,
+    end_x: f32,
+    y_end: f32,
+    color: Color32,
+) {
+    let half_width = 20.0;
+    painter.line_segment(
+        [
+            Pos2::new(start_x - half_width, y_start),
+            Pos2::new(start_x + half_width, y_start),
+        ],
+        Stroke::new(1.5, color),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(end_x - half_width, y_end),
+            Pos2::new(end_x + half_width, y_end),
+        ],
+        Stroke::new(1.5, color),
+    );
+}
+
+fn draw_frame_tags(
+    painter: &Painter,
+    frames: &[FrameType],
+    mid_x: f32,
+    mid_y: f32,
+    tag_width: f32,
+    max_tags: usize,
+) {
+    let frames_to_show: Vec<&FrameType> = frames.iter().take(max_tags).collect();
+    let tag_gap = 2.0;
+    let total_width = frames_to_show.len() as f32 * (tag_width + tag_gap);
+    let start_x = mid_x - total_width / 2.0;
+
+    for (i, frame) in frames_to_show.iter().enumerate() {
+        let tag_x = start_x + (i as f32 * (tag_width + tag_gap));
+        let tag_rect =
+            Rect::from_min_size(Pos2::new(tag_x, mid_y - 6.0), Vec2::new(tag_width, 12.0));
+        painter.rect_filled(tag_rect, 2.0, frame.color());
+        painter.text(
+            tag_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            frame.short_name(),
+            egui::FontId::proportional(8.0),
+            Color32::WHITE,
+        );
+    }
+}
+
+fn draw_time_markers(
+    painter: &Painter,
+    layout: &DiagramLayout,
+    time_range: f64,
+    min_time: f64,
+    visible_start: f64,
+    visible_end: f64,
+    time_to_y: &impl Fn(f64) -> f32,
+) {
+    let time_step = if time_range > 1000.0 {
+        100.0
+    } else if time_range > 100.0 {
+        10.0
+    } else {
+        1.0
+    };
+
+    let first_marker = (visible_start / time_step).floor() * time_step;
+    let mut marker_time = first_marker;
+
+    while marker_time <= visible_end {
+        if marker_time >= min_time {
+            let y = time_to_y(marker_time);
+            painter.line_segment(
+                [
+                    Pos2::new(layout.left_x - 5.0, y),
+                    Pos2::new(layout.left_x, y),
+                ],
+                Stroke::new(1.0, Color32::DARK_GRAY),
+            );
+            painter.text(
+                Pos2::new(layout.rect.left() + 5.0, y),
+                egui::Align2::LEFT_CENTER,
+                format!("{:.1}", marker_time),
+                egui::FontId::proportional(9.0),
+                Color32::GRAY,
+            );
+        }
+        marker_time += time_step;
+    }
+}
+
+fn draw_progress_indicator(
+    painter: &Painter,
+    layout: &DiagramLayout,
+    viewport: Rect,
+    first_idx: usize,
+    total: usize,
+) {
+    let current = first_idx + VISIBLE_BUFFER;
+    let progress = current as f32 / total as f32 * 100.0;
+    painter.text(
+        Pos2::new(
+            layout.rect.right() - 10.0,
+            layout.rect.top() + viewport.top() + 25.0,
+        ),
+        egui::Align2::RIGHT_CENTER,
+        format!("#{} ({:.0}%)", current.min(total), progress),
+        egui::FontId::proportional(10.0),
+        Color32::GRAY,
+    );
+}
+
+fn draw_dual_progress(
+    painter: &Painter,
+    layout: &DiagramLayout,
+    viewport: Rect,
+    visible_start_time: f64,
+    time_range: f64,
+    min_time: f64,
+) {
+    let pct = ((visible_start_time - min_time) / time_range * 100.0) as f32;
+    painter.text(
+        Pos2::new(
+            layout.rect.right() - 10.0,
+            layout.rect.top() + viewport.top() + 25.0,
+        ),
+        egui::Align2::RIGHT_CENTER,
+        format!("{:.0}ms ({:.0}%)", visible_start_time, pct),
+        egui::FontId::proportional(10.0),
+        Color32::GRAY,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_single_packet(
+    painter: &Painter,
+    layout: &DiagramLayout,
+    packet: &PacketInfo,
+    idx: usize,
+    is_selected: bool,
+    show_loss_markers: bool,
+    show_rtt: bool,
+    correlation: &PacketCorrelation,
+) -> Rect {
+    let y_start = layout.top_y + (idx as f32 * PACKET_HEIGHT) + PACKET_HEIGHT / 2.0;
+    let diagonal_offset = PACKET_HEIGHT * 0.4;
+
+    let (start_x, end_x, y_end, color) = match packet.direction {
+        PacketDirection::Sent => (
+            layout.left_x,
+            layout.right_x,
+            y_start + diagonal_offset,
+            SENT_COLOR,
+        ),
+        PacketDirection::Received => (
+            layout.right_x,
+            layout.left_x,
+            y_start + diagonal_offset,
+            RECEIVED_COLOR,
+        ),
+    };
+
+    draw_time_ticks(painter, start_x, y_start, end_x, y_end, color);
+    painter.line_segment(
+        [Pos2::new(start_x, y_start), Pos2::new(end_x, y_end)],
+        Stroke::new(2.0, color),
+    );
+    painter.circle_filled(Pos2::new(start_x, y_start), 4.0, color);
+    painter.circle_filled(Pos2::new(end_x, y_end), 4.0, color);
+
+    painter.text(
+        Pos2::new(layout.rect.left() + 8.0, y_start),
+        egui::Align2::LEFT_CENTER,
+        format!("{:.2}", packet.time),
+        egui::FontId::proportional(11.0),
+        Color32::GRAY,
+    );
+
+    let mid_x = (start_x + end_x) / 2.0;
+    let mid_y = (y_start + y_end) / 2.0;
+
+    draw_frame_tags(painter, &packet.frames, mid_x, mid_y, 38.0, 4);
+
+    painter.text(
+        Pos2::new(layout.rect.right() - 10.0, y_end),
+        egui::Align2::RIGHT_CENTER,
+        format!("{:.2}", packet.time),
+        egui::FontId::proportional(11.0),
+        Color32::GRAY,
+    );
+
+    let info_x = if start_x < end_x {
+        end_x + 8.0
+    } else {
+        start_x + 8.0
+    };
+    painter.text(
+        Pos2::new(info_x, mid_y),
+        egui::Align2::LEFT_CENTER,
+        format!("{}:{}", packet.packet_type_short, packet.packet_number),
+        egui::FontId::proportional(10.0),
+        Color32::LIGHT_GRAY,
+    );
+
+    let arrow_rect = Rect::from_two_pos(
+        Pos2::new(start_x.min(end_x) - 5.0, y_start.min(y_end) - 12.0),
+        Pos2::new(start_x.max(end_x) + 5.0, y_start.max(y_end) + 12.0),
+    );
+
+    if is_selected {
+        painter.rect_stroke(
+            arrow_rect,
+            2.0,
+            Stroke::new(2.0, Color32::YELLOW),
+            StrokeKind::Inside,
+        );
+    }
+
+    if show_loss_markers
+        && packet.direction == PacketDirection::Sent
+        && correlation.is_packet_lost(packet.packet_number)
+    {
+        draw_loss_marker(painter, Pos2::new(mid_x, mid_y + 18.0), 14.0);
+    }
+
+    if show_rtt && packet.direction == PacketDirection::Sent {
+        if let Some(rtt) = correlation.get_rtt(packet.packet_number) {
+            painter.text(
+                Pos2::new(mid_x + 5.0, y_start - 2.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{:.1}ms", rtt),
+                egui::FontId::proportional(9.0),
+                Color32::from_rgb(100, 200, 100),
+            );
+        }
+    }
+
+    arrow_rect
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_reordering(
+    painter: &Painter,
+    layout: &DiagramLayout,
+    all_packets: &[PacketInfo],
+    filtered_indices: &[usize],
+    first_vis: usize,
+    last_vis: usize,
+    correlation: &PacketCorrelation,
+) {
+    let visible_start = filtered_indices
+        .get(first_vis)
+        .map(|&i| all_packets[i].time as f32)
+        .unwrap_or(0.0);
+    let visible_end = filtered_indices
+        .get(last_vis.saturating_sub(1))
+        .map(|&i| all_packets[i].time as f32)
+        .unwrap_or(f32::MAX);
+
+    let pn_to_y: HashMap<u64, f32> = (first_vis..last_vis)
+        .filter_map(|vis_idx| filtered_indices.get(vis_idx).map(|&i| &all_packets[i]))
+        .filter(|p| p.direction == PacketDirection::Received)
+        .enumerate()
+        .map(|(i, p)| {
+            (
+                p.packet_number,
+                layout.top_y + (first_vis + i) as f32 * PACKET_HEIGHT + PACKET_HEIGHT / 2.0,
+            )
+        })
+        .collect();
+
+    let reorder_color = Color32::from_rgb(255, 140, 0);
+    let line_x = layout.right_x + 15.0;
+
+    for reorder in correlation.visible_reorderings(visible_start, visible_end, 50) {
+        let (Some(&y1), Some(&y2)) = (
+            pn_to_y.get(&reorder.earlier_pn),
+            pn_to_y.get(&reorder.later_pn),
+        ) else {
+            continue;
+        };
+
+        painter.line_segment(
+            [Pos2::new(line_x, y1), Pos2::new(line_x, y2)],
+            Stroke::new(2.0, reorder_color),
+        );
+        painter.circle_filled(Pos2::new(line_x, y1), 5.0, reorder_color);
+        painter.circle_filled(Pos2::new(line_x, y2), 5.0, reorder_color);
+
+        for (y, pn) in [(y1, reorder.earlier_pn), (y2, reorder.later_pn)] {
+            painter.text(
+                Pos2::new(line_x + 8.0, y),
+                egui::Align2::LEFT_CENTER,
+                format!("#{pn}"),
+                egui::FontId::proportional(9.0),
+                reorder_color,
+            );
+        }
     }
 }
 
