@@ -25,7 +25,7 @@ pub enum FrameType {
     ConnectionClose,
     HandshakeDone,
     Datagram,
-    Unknown,
+    Custom(String),
 }
 
 impl FrameType {
@@ -53,7 +53,17 @@ impl FrameType {
             QuicFrame::ConnectionClose { .. } => Self::ConnectionClose,
             QuicFrame::HandshakeDone => Self::HandshakeDone,
             QuicFrame::Datagram { .. } => Self::Datagram,
-            _ => Self::Unknown,
+            QuicFrame::Unknown {
+                raw_frame_type,
+                raw,
+                ..
+            } => {
+                let name = raw
+                    .as_ref()
+                    .and_then(|r| r.data.clone())
+                    .unwrap_or_else(|| format!("0x{:X}", raw_frame_type));
+                Self::Custom(name)
+            }
         }
     }
 
@@ -81,11 +91,11 @@ impl FrameType {
             Self::ConnectionClose => "CONNECTION_CLOSE".to_string(),
             Self::HandshakeDone => "HANDSHAKE_DONE".to_string(),
             Self::Datagram => "DATAGRAM".to_string(),
-            Self::Unknown => "OTHER".to_string(),
+            Self::Custom(name) => name.to_uppercase(),
         }
     }
 
-    /// Short 3-4 character name for compact display.
+    /// Short 3-5 character name for compact display.
     pub fn short_name(&self) -> String {
         match self {
             Self::Padding => "PAD".to_string(),
@@ -107,7 +117,7 @@ impl FrameType {
             Self::ConnectionClose => "CLS".to_string(),
             Self::HandshakeDone => "HSD".to_string(),
             Self::Datagram => "DGM".to_string(),
-            Self::Unknown => "???".to_string(),
+            Self::Custom(name) => derive_short_name(name),
         }
     }
 
@@ -148,6 +158,33 @@ impl FrameType {
     }
 }
 
+fn derive_short_name(name: &str) -> String {
+    if name.starts_with("0x") {
+        return name.chars().take(5).collect();
+    }
+
+    let parts: Vec<&str> = name
+        .split(['_', '-', ' '])
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let result: String = match parts.len() {
+        0 => name.chars().take(5).collect(),
+        1 => name
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .take(5)
+            .collect(),
+        _ => parts
+            .iter()
+            .filter_map(|p| p.chars().next())
+            .take(5)
+            .collect(),
+    };
+
+    result.to_uppercase()
+}
+
 /// Convert HSV color values to RGB.
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     let c = v * s;
@@ -168,6 +205,23 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
         ((g + m) * 255.0) as u8,
         ((b + m) * 255.0) as u8,
     )
+}
+
+/// Format bytes as human-readable string using binary units (B, KiB, MiB, GiB).
+pub fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 /// Generate a distinct color for a stream ID using golden ratio distribution.

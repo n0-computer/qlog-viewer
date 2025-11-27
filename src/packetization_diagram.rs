@@ -206,7 +206,13 @@ impl PacketizationDiagram {
                             Vec2::new(width, LANE_HEIGHT - 4.0),
                         );
 
-                        painter.rect_filled(packet_rect, 1.0, Color32::from_rgb(30, 30, 30));
+                        // Alternating colors for better visual separation
+                        let packet_color = if (first_packet_idx + idx) % 2 == 0 {
+                            Color32::from_rgb(35, 35, 45)
+                        } else {
+                            Color32::from_rgb(25, 25, 35)
+                        };
+                        painter.rect_filled(packet_rect, 1.0, packet_color);
                         painter.rect_stroke(
                             packet_rect,
                             1.0,
