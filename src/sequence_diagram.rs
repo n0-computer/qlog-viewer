@@ -11,6 +11,8 @@ const VISIBLE_BUFFER: usize = 10;
 const HEADER_HEIGHT: f32 = 40.0;
 const LEFT_MARGIN: f32 = 110.0;
 const RIGHT_MARGIN: f32 = 120.0;
+const DUAL_LEFT_MARGIN: f32 = 60.0;
+const DUAL_RIGHT_MARGIN: f32 = 70.0;
 const SENT_COLOR: Color32 = Color32::from_rgb(0, 150, 255);
 const RECEIVED_COLOR: Color32 = Color32::from_rgb(220, 80, 80);
 const LOSS_COLOR: Color32 = Color32::RED;
@@ -27,6 +29,18 @@ pub struct SequenceDiagram {
     show_reordering: bool,
     show_rtt: bool,
     dual_time_scale: f32,
+    files_swapped: bool,
+    compress_gaps: bool,
+}
+
+const GAP_THRESHOLD_MS: f64 = 5.0;
+const COMPRESSED_GAP_HEIGHT: f32 = 30.0;
+
+#[derive(Clone)]
+struct TimeGap {
+    start_time: f64,
+    end_time: f64,
+    compressed_amount: f64,
 }
 
 struct DualArrow {
@@ -47,6 +61,13 @@ struct DiagramLayout {
     rect: Rect,
 }
 
+struct TimeContext<'a> {
+    min_time: f64,
+    max_time: f64,
+    gaps: &'a [TimeGap],
+    pixels_per_ms: f32,
+}
+
 impl SequenceDiagram {
     pub fn new() -> Self {
         Self {
@@ -60,7 +81,9 @@ impl SequenceDiagram {
             show_loss_markers: true,
             show_reordering: false,
             show_rtt: false,
-            dual_time_scale: 5.0,
+            dual_time_scale: 30.0,
+            files_swapped: false,
+            compress_gaps: true,
         }
     }
 
@@ -104,11 +127,17 @@ impl SequenceDiagram {
     pub fn show_dual(
         &mut self,
         ui: &mut egui::Ui,
-        left_file: &LoadedFile,
-        right_file: &LoadedFile,
+        file_a: &LoadedFile,
+        file_b: &LoadedFile,
         selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
     ) {
+        let (left_file, right_file) = if self.files_swapped {
+            (file_b, file_a)
+        } else {
+            (file_a, file_b)
+        };
+
         let arrows = Self::build_dual_arrows(left_file, right_file);
 
         if arrows.is_empty() {
@@ -118,8 +147,14 @@ impl SequenceDiagram {
 
         ui.horizontal(|ui| ui.heading("Sequence Diagram (Dual File)"));
 
-        let (min_time, max_time, time_range) = Self::compute_time_bounds(&arrows);
-        self.render_dual_controls(ui, &arrows, min_time, max_time, time_range);
+        let (min_time, _max_time, time_range) = Self::compute_time_bounds(&arrows);
+        let gaps = if self.compress_gaps {
+            Self::detect_gaps(&arrows, min_time)
+        } else {
+            Vec::new()
+        };
+
+        self.render_dual_controls(ui, &arrows, time_range);
 
         self.render_dual_file_diagram(
             ui,
@@ -128,6 +163,7 @@ impl SequenceDiagram {
             right_file,
             min_time,
             time_range,
+            &gaps,
             selected_event_idx,
             selected_file_idx,
         );
@@ -296,7 +332,10 @@ impl SequenceDiagram {
                     Color32::WHITE,
                 );
 
-                draw_timelines(&painter, &layout, first_vis, last_vis);
+                let timeline_top =
+                    (layout.top_y + first_vis as f32 * PACKET_HEIGHT).max(layout.top_y);
+                let timeline_bottom = layout.top_y + last_vis as f32 * PACKET_HEIGHT;
+                draw_timelines(&painter, &layout, timeline_top, timeline_bottom);
 
                 for vis_idx in first_vis..last_vis {
                     let Some(&pkt_idx) = filtered_indices.get(vis_idx) else {
@@ -352,11 +391,11 @@ impl SequenceDiagram {
         let left_packets = Self::extract_packets(&left_file.qlog_data).packets;
         let right_packets = Self::extract_packets(&right_file.qlog_data).packets;
 
-        let recv_times = |packets: &[PacketInfo]| -> HashMap<u64, f64> {
+        let recv_times = |packets: &[PacketInfo]| -> HashMap<(String, u64), f64> {
             packets
                 .iter()
                 .filter(|p| p.direction == PacketDirection::Received)
-                .map(|p| (p.packet_number, p.time))
+                .map(|p| ((p.packet_type.clone(), p.packet_number), p.time))
                 .collect()
         };
 
@@ -373,7 +412,9 @@ impl SequenceDiagram {
                 .iter()
                 .filter(|p| p.direction == PacketDirection::Sent)
             {
-                let recv_time = recv_times.get(&p.packet_number).copied();
+                let recv_time = recv_times
+                    .get(&(p.packet_type.clone(), p.packet_number))
+                    .copied();
                 arrows.push(DualArrow {
                     send_time: p.time,
                     recv_time: recv_time.unwrap_or(p.time),
@@ -409,22 +450,76 @@ impl SequenceDiagram {
         (min_time, max_time, time_range)
     }
 
-    fn render_dual_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        arrows: &[DualArrow],
+    fn detect_gaps(arrows: &[DualArrow], min_time: f64) -> Vec<TimeGap> {
+        if arrows.is_empty() {
+            return Vec::new();
+        }
+
+        let mut event_times: Vec<f64> = arrows
+            .iter()
+            .flat_map(|a| [a.send_time, a.recv_time])
+            .collect();
+        event_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        event_times.dedup();
+
+        let mut gaps = Vec::new();
+        let mut prev_time = min_time;
+
+        for &t in &event_times {
+            let gap_size = t - prev_time;
+            if gap_size > GAP_THRESHOLD_MS {
+                let compressed = gap_size - GAP_THRESHOLD_MS;
+                gaps.push(TimeGap {
+                    start_time: prev_time + GAP_THRESHOLD_MS / 2.0,
+                    end_time: t - GAP_THRESHOLD_MS / 2.0,
+                    compressed_amount: compressed,
+                });
+            }
+            prev_time = t;
+        }
+
+        gaps
+    }
+
+    fn time_to_compressed_y(
+        time: f64,
         min_time: f64,
-        max_time: f64,
-        time_range: f64,
-    ) {
+        gaps: &[TimeGap],
+        pixels_per_ms: f32,
+        top_y: f32,
+    ) -> f32 {
+        let mut total_compression = 0.0;
+        for gap in gaps {
+            if time > gap.end_time {
+                total_compression += gap.compressed_amount;
+            } else if time > gap.start_time {
+                let within_gap = time - gap.start_time;
+                let gap_duration = gap.end_time - gap.start_time;
+                total_compression += within_gap / gap_duration * gap.compressed_amount;
+            }
+        }
+        let adjusted_time = time - min_time - total_compression;
+        top_y
+            + (adjusted_time as f32 * pixels_per_ms)
+            + (gaps.iter().filter(|g| time > g.end_time).count() as f32 * COMPRESSED_GAP_HEIGHT)
+    }
+
+    fn compute_compressed_height(time_range: f64, gaps: &[TimeGap], pixels_per_ms: f32) -> f32 {
+        let total_compression: f64 = gaps.iter().map(|g| g.compressed_amount).sum();
+        let compressed_time = time_range - total_compression;
+        (compressed_time as f32 * pixels_per_ms)
+            + (gaps.len() as f32 * COMPRESSED_GAP_HEIGHT)
+            + 100.0
+    }
+
+    fn render_dual_controls(&mut self, ui: &mut egui::Ui, arrows: &[DualArrow], time_range: f64) {
         let total_loss_count = arrows.iter().filter(|a| a.is_lost).count();
 
         ui.horizontal(|ui| {
             ui.label(format!(
-                "{} arrows | {:.2} - {:.2} ms ({:.1}s)",
+                "{} arrows | 0.00 - {:.2} ms ({:.1}s)",
                 arrows.len(),
-                min_time,
-                max_time,
+                time_range,
                 time_range / 1000.0
             ));
 
@@ -441,6 +536,14 @@ impl SequenceDiagram {
                     .logarithmic(true)
                     .suffix(" px/ms"),
             );
+
+            ui.separator();
+            ui.checkbox(&mut self.compress_gaps, "Compress Gaps");
+
+            ui.separator();
+            if ui.button("Swap").clicked() {
+                self.files_swapped = !self.files_swapped;
+            }
         });
         ui.separator();
     }
@@ -454,11 +557,16 @@ impl SequenceDiagram {
         right_file: &LoadedFile,
         min_time: f64,
         time_range: f64,
+        gaps: &[TimeGap],
         selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
     ) {
         let pixels_per_ms = self.dual_time_scale;
-        let total_content_height = (time_range as f32 * pixels_per_ms) + 100.0;
+        let total_content_height = if gaps.is_empty() {
+            (time_range as f32 * pixels_per_ms) + 100.0
+        } else {
+            Self::compute_compressed_height(time_range, gaps, pixels_per_ms)
+        };
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -470,14 +578,19 @@ impl SequenceDiagram {
                 let rect = response.rect;
 
                 let layout = DiagramLayout {
-                    left_x: rect.left() + 60.0,
-                    right_x: rect.right() - 20.0,
-                    top_y: rect.top() + 40.0,
+                    left_x: rect.left() + DUAL_LEFT_MARGIN,
+                    right_x: rect.right() - DUAL_RIGHT_MARGIN,
+                    top_y: rect.top() + HEADER_HEIGHT,
                     rect,
                 };
 
-                let time_to_y =
-                    |t: f64| -> f32 { layout.top_y + ((t - min_time) as f32 * pixels_per_ms) };
+                let time_to_y = |t: f64| -> f32 {
+                    if gaps.is_empty() {
+                        layout.top_y + ((t - min_time) as f32 * pixels_per_ms)
+                    } else {
+                        Self::time_to_compressed_y(t, min_time, gaps, pixels_per_ms, layout.top_y)
+                    }
+                };
 
                 draw_header(
                     &painter,
@@ -491,27 +604,30 @@ impl SequenceDiagram {
                     RECEIVED_COLOR,
                 );
 
-                let visible_start_time =
-                    min_time + ((viewport.top() - 40.0).max(0.0) / pixels_per_ms) as f64;
-                let visible_end_time =
-                    min_time + ((viewport.bottom() - 40.0) / pixels_per_ms) as f64;
-
-                draw_dual_timelines(
+                draw_timelines(
                     &painter,
                     &layout,
-                    time_to_y(visible_start_time.max(min_time)),
-                    time_to_y(visible_end_time.min(min_time + time_range)),
+                    layout.top_y,
+                    layout.top_y + total_content_height,
                 );
 
+                let time_ctx = TimeContext {
+                    min_time,
+                    max_time: min_time + time_range,
+                    gaps,
+                    pixels_per_ms,
+                };
                 draw_time_markers(
                     &painter,
                     &layout,
-                    time_range,
-                    min_time,
-                    visible_start_time,
-                    visible_end_time,
-                    &time_to_y,
+                    &viewport,
+                    total_content_height,
+                    &time_ctx,
                 );
+
+                if !gaps.is_empty() {
+                    draw_gap_indicators(&painter, &layout, gaps, &time_to_y);
+                }
 
                 let send_time_counts = Self::count_simultaneous_sends(arrows);
                 let arrow_rects =
@@ -526,15 +642,6 @@ impl SequenceDiagram {
                 );
 
                 self.draw_selection_indicator(&painter, &layout, viewport, arrow_rects.len());
-
-                draw_dual_progress(
-                    &painter,
-                    &layout,
-                    viewport,
-                    visible_start_time,
-                    time_range,
-                    min_time,
-                );
             });
     }
 
@@ -602,12 +709,31 @@ impl SequenceDiagram {
                 Stroke::new(line_width, line_color),
             );
 
+            let tick_half = 4.0;
+            painter.line_segment(
+                [
+                    Pos2::new(start_x - tick_half, y_send_adjusted),
+                    Pos2::new(start_x + tick_half, y_send_adjusted),
+                ],
+                Stroke::new(2.0, line_color),
+            );
+
             painter.circle_filled(Pos2::new(start_x, y_send_adjusted), marker_size, line_color);
             if !is_truncated {
-                painter.circle_filled(
+                painter.line_segment(
+                    [
+                        Pos2::new(actual_end_x - tick_half, actual_end_y),
+                        Pos2::new(actual_end_x + tick_half, actual_end_y),
+                    ],
+                    Stroke::new(2.0, line_color),
+                );
+
+                draw_arrowhead(
+                    painter,
+                    Pos2::new(start_x, y_send_adjusted),
                     Pos2::new(actual_end_x, actual_end_y),
-                    marker_size,
                     line_color,
+                    8.0,
                 );
             }
 
@@ -842,10 +968,7 @@ fn draw_header(
     );
 }
 
-fn draw_timelines(painter: &Painter, layout: &DiagramLayout, first_idx: usize, last_idx: usize) {
-    let top = (layout.top_y + first_idx as f32 * PACKET_HEIGHT).max(layout.top_y);
-    let bottom = layout.top_y + last_idx as f32 * PACKET_HEIGHT;
-
+fn draw_timelines(painter: &Painter, layout: &DiagramLayout, top: f32, bottom: f32) {
     for x in [layout.left_x, layout.right_x] {
         painter.line_segment(
             [Pos2::new(x, top), Pos2::new(x, bottom)],
@@ -854,11 +977,36 @@ fn draw_timelines(painter: &Painter, layout: &DiagramLayout, first_idx: usize, l
     }
 }
 
-fn draw_dual_timelines(painter: &Painter, layout: &DiagramLayout, top: f32, bottom: f32) {
-    for x in [layout.left_x, layout.right_x] {
-        painter.line_segment(
-            [Pos2::new(x, top), Pos2::new(x, bottom)],
-            Stroke::new(2.0, Color32::GRAY),
+fn draw_gap_indicators<F>(
+    painter: &Painter,
+    layout: &DiagramLayout,
+    gaps: &[TimeGap],
+    time_to_y: &F,
+) where
+    F: Fn(f64) -> f32,
+{
+    let gap_color = Color32::from_rgb(180, 160, 80);
+    let text_color = Color32::from_rgb(150, 150, 150);
+
+    for gap in gaps {
+        let y_pos = time_to_y(gap.start_time);
+        let end_y = y_pos + COMPRESSED_GAP_HEIGHT;
+        let center_x = (layout.left_x + layout.right_x) / 2.0;
+
+        for x in [layout.left_x, layout.right_x] {
+            painter.line_segment(
+                [Pos2::new(x, y_pos), Pos2::new(x, end_y)],
+                Stroke::new(5.0, gap_color),
+            );
+        }
+
+        let label = format!("{:.1}ms compressed", gap.compressed_amount);
+        painter.text(
+            Pos2::new(center_x, y_pos + COMPRESSED_GAP_HEIGHT / 2.0),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(11.0),
+            text_color,
         );
     }
 }
@@ -919,42 +1067,64 @@ fn draw_frame_tags(
 fn draw_time_markers(
     painter: &Painter,
     layout: &DiagramLayout,
-    time_range: f64,
-    min_time: f64,
-    visible_start: f64,
-    visible_end: f64,
-    time_to_y: &impl Fn(f64) -> f32,
+    viewport: &Rect,
+    total_height: f32,
+    time_ctx: &TimeContext,
 ) {
-    let time_step = if time_range > 1000.0 {
-        100.0
-    } else if time_range > 100.0 {
-        10.0
-    } else {
-        1.0
-    };
+    let target_markers = 6;
+    let step_pixels = viewport.height() / target_markers as f32;
+    let marker_color = Color32::from_rgb(140, 140, 140);
+    let max_markers = (total_height / step_pixels).ceil() as usize + 1;
 
-    let first_marker = (visible_start / time_step).floor() * time_step;
-    let mut marker_time = first_marker;
+    for i in 0..max_markers {
+        let visual_offset = i as f32 * step_pixels;
+        let y = layout.top_y + visual_offset;
 
-    while marker_time <= visible_end {
-        if marker_time >= min_time {
-            let y = time_to_y(marker_time);
-            painter.line_segment(
-                [
-                    Pos2::new(layout.left_x - 5.0, y),
-                    Pos2::new(layout.left_x, y),
-                ],
-                Stroke::new(1.0, Color32::DARK_GRAY),
-            );
-            painter.text(
-                Pos2::new(layout.rect.left() + 5.0, y),
-                egui::Align2::LEFT_CENTER,
-                format!("{:.1}", marker_time),
-                egui::FontId::proportional(9.0),
-                Color32::GRAY,
-            );
+        let mut time = time_ctx.min_time + (visual_offset / time_ctx.pixels_per_ms) as f64;
+
+        let mut compression_before = 0.0;
+        for gap in time_ctx.gaps {
+            let gap_visual_start = (gap.start_time - time_ctx.min_time - compression_before) as f32
+                * time_ctx.pixels_per_ms
+                + (time_ctx
+                    .gaps
+                    .iter()
+                    .take_while(|g| g.end_time <= gap.start_time)
+                    .count() as f32
+                    * COMPRESSED_GAP_HEIGHT);
+
+            if visual_offset > gap_visual_start {
+                time += gap.compressed_amount;
+            }
+            compression_before += gap.compressed_amount;
         }
-        marker_time += time_step;
+
+        time = time.clamp(time_ctx.min_time, time_ctx.max_time);
+
+        let decimals = if time < 1.0 {
+            2
+        } else if time < 100.0 {
+            1
+        } else {
+            0
+        };
+        let label = format!("{:.prec$}", time, prec = decimals);
+
+        painter.text(
+            Pos2::new(layout.left_x - 15.0, y),
+            egui::Align2::RIGHT_CENTER,
+            &label,
+            egui::FontId::proportional(10.0),
+            marker_color,
+        );
+
+        painter.text(
+            Pos2::new(layout.right_x + DUAL_RIGHT_MARGIN / 2.0, y),
+            egui::Align2::CENTER_CENTER,
+            &label,
+            egui::FontId::proportional(10.0),
+            marker_color,
+        );
     }
 }
 
@@ -974,27 +1144,6 @@ fn draw_progress_indicator(
         ),
         egui::Align2::RIGHT_CENTER,
         format!("#{} ({:.0}%)", current.min(total), progress),
-        egui::FontId::proportional(10.0),
-        Color32::GRAY,
-    );
-}
-
-fn draw_dual_progress(
-    painter: &Painter,
-    layout: &DiagramLayout,
-    viewport: Rect,
-    visible_start_time: f64,
-    time_range: f64,
-    min_time: f64,
-) {
-    let pct = ((visible_start_time - min_time) / time_range * 100.0) as f32;
-    painter.text(
-        Pos2::new(
-            layout.rect.right() - 10.0,
-            layout.rect.top() + viewport.top() + 25.0,
-        ),
-        egui::Align2::RIGHT_CENTER,
-        format!("{:.0}ms ({:.0}%)", visible_start_time, pct),
         egui::FontId::proportional(10.0),
         Color32::GRAY,
     );
@@ -1139,7 +1288,7 @@ fn draw_reordering(
         .collect();
 
     let reorder_color = Color32::from_rgb(255, 140, 0);
-    let line_x = layout.right_x + 15.0;
+    let line_x = layout.right_x + 50.0;
 
     for reorder in correlation.visible_reorderings(visible_start, visible_end, 50) {
         let (Some(&y1), Some(&y2)) = (
@@ -1166,6 +1315,37 @@ fn draw_reordering(
             );
         }
     }
+}
+
+fn draw_arrowhead(painter: &Painter, from: Pos2, to: Pos2, color: Color32, size: f32) {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0 {
+        return;
+    }
+
+    let ux = dx / len;
+    let uy = dy / len;
+
+    let px = -uy;
+    let py = ux;
+
+    let tip = to;
+    let left = Pos2::new(
+        tip.x - ux * size + px * size * 0.5,
+        tip.y - uy * size + py * size * 0.5,
+    );
+    let right = Pos2::new(
+        tip.x - ux * size - px * size * 0.5,
+        tip.y - uy * size - py * size * 0.5,
+    );
+
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, left, right],
+        color,
+        Stroke::NONE,
+    ));
 }
 
 fn draw_loss_marker(painter: &Painter, center: Pos2, size: f32) {
