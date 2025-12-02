@@ -56,8 +56,8 @@ pub struct QlogViewerApp {
 }
 
 impl QlogViewerApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        Self {
+    pub fn new(_cc: &eframe::CreationContext<'_>, initial_files: Vec<PathBuf>) -> Self {
+        let mut app = Self {
             loaded_files: Vec::new(),
             selected_file_idx: 0,
             loading: false,
@@ -73,7 +73,13 @@ impl QlogViewerApp {
             multiplexing_diagram: MultiplexingDiagram::new(),
             packetization_diagram: PacketizationDiagram::new(),
             stats_view: StatsView::new(),
+        };
+
+        for path in initial_files {
+            app.load_file(path);
         }
+
+        app
     }
 
     fn selected_file(&self) -> Option<&LoadedFile> {

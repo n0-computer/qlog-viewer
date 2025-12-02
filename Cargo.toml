@@ -41,6 +41,9 @@ rayon = "1.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
 # CI release profile with heavy optimizations for distribution builds
 [profile.ci-release]
 inherits = "release"
