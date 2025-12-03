@@ -190,7 +190,7 @@ impl FrameType {
         match self {
             Self::Stream(_) => Color32::from_rgb(255, 80, 80),
             Self::Crypto => Color32::from_rgb(128, 0, 128),
-            Self::Ack => Color32::from_rgb(0, 128, 0),
+            Self::Ack | Self::ImmediateAck => Color32::from_rgb(0, 128, 0),
             Self::Padding => Color32::from_rgb(255, 165, 0),
             Self::MaxData | Self::MaxStreamData | Self::MaxStreams => {
                 Color32::from_rgb(100, 150, 200)
@@ -198,6 +198,15 @@ impl FrameType {
             Self::HandshakeDone => Color32::from_rgb(50, 150, 50),
             Self::NewConnectionId | Self::RetireConnectionId => Color32::from_rgb(200, 100, 50),
             Self::ConnectionClose => Color32::from_rgb(255, 100, 100),
+            Self::AckFrequency => Color32::from_rgb(200, 150, 50),
+            Self::ObservedAddress => {
+                // QAD
+                Color32::from_rgb(200, 0, 50)
+            }
+            Self::AddAddress | Self::RemoveAddress | Self::ReachOut => {
+                // QNT
+                Color32::from_rgb(200, 50, 50)
+            }
             _ => Color32::from_rgb(100, 100, 100),
         }
     }

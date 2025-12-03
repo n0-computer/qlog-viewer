@@ -11,6 +11,7 @@ use egui::{
     CentralPanel, CollapsingHeader, Context, FontFamily, FontId, SidePanel, TextFormat,
     TopBottomPanel,
 };
+use qlog::events::quic::PacketHeader;
 use qlog::events::RawInfo;
 use qlog::events::{quic::QuicFrame, Event, EventData};
 use std::collections::BTreeSet;
@@ -540,6 +541,7 @@ impl QlogViewerApp {
                 };
 
                 ui.heading(format!("Event #{} - {}", idx, data.get_event_name(event)));
+                render_header(ui, &event.data);
 
                 ui.separator();
 
@@ -593,6 +595,13 @@ impl QlogViewerApp {
                         }
                     });
                 }
+                ui.collapsing("Raw JSON", |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let s = serde_json::to_string_pretty(&event).unwrap();
+                        ui.label(s);
+                    });
+                });
+
                 // Check if this is a lost packet in dual-file mode
                 if self.view_mode == ViewMode::SequenceDiagram && self.loaded_files.len() >= 2 {
                     if let EventData::PacketSent(sent_data) = &event.data {
@@ -1466,5 +1475,39 @@ fn render_raw_info(ui: &mut egui::Ui, raw: &RawInfo) {
         ui.label("Raw Info: Data");
         ui.label(data);
         ui.end_row();
+    }
+}
+
+fn render_header(ui: &mut egui::Ui, event: &EventData) {
+    match event {
+        EventData::PacketSent(ref data) => {
+            render_inner_header(ui, &data.header);
+        }
+        EventData::PacketReceived(ref data) => {
+            render_inner_header(ui, &data.header);
+        }
+        EventData::PacketDropped(ref data) => {
+            if let Some(ref header) = data.header {
+                render_inner_header(ui, header);
+            }
+        }
+        EventData::PacketBuffered(ref data) => {
+            if let Some(ref header) = data.header {
+                render_inner_header(ui, header);
+            }
+        }
+        EventData::PacketLost(ref data) => {
+            if let Some(ref header) = data.header {
+                render_inner_header(ui, header);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_inner_header(ui: &mut egui::Ui, header: &PacketHeader) {
+    ui.label(format!("Type: {:?}", header.packet_type));
+    if let Some(pn) = header.packet_number {
+        ui.label(format!("Number: {pn}"));
     }
 }
