@@ -531,10 +531,7 @@ impl PacketizationDiagram {
                                 event_idx,
                             });
 
-                            if let QuicFrame::Stream {
-                                stream_id, raw, ..
-                            } = frame
-                            {
+                            if let QuicFrame::Stream { stream_id, raw, .. } = frame {
                                 let length = raw.as_ref().and_then(|r| r.length).unwrap_or(1000);
                                 sent.stream_ranges.entry(*stream_id).or_default().push((
                                     frame_offset,
@@ -590,10 +587,7 @@ impl PacketizationDiagram {
                                 event_idx,
                             });
 
-                            if let QuicFrame::Stream {
-                                stream_id, raw, ..
-                            } = frame
-                            {
+                            if let QuicFrame::Stream { stream_id, raw, .. } = frame {
                                 let length = raw.as_ref().and_then(|r| r.length).unwrap_or(1000);
                                 received.stream_ranges.entry(*stream_id).or_default().push((
                                     frame_offset,

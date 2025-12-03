@@ -25,12 +25,12 @@ pub enum VisualizationMode {
 
 // Path color palette for multipath visualization
 const PATH_COLORS: &[(u8, u8, u8)] = &[
-    (41, 128, 185),   // Blue (path 0)
-    (39, 174, 96),    // Green (path 1)
-    (230, 126, 34),   // Orange (path 2)
-    (142, 68, 173),   // Purple (path 3)
-    (192, 57, 43),    // Red (path 4)
-    (22, 160, 133),   // Teal (path 5)
+    (41, 128, 185), // Blue (path 0)
+    (39, 174, 96),  // Green (path 1)
+    (230, 126, 34), // Orange (path 2)
+    (142, 68, 173), // Purple (path 3)
+    (192, 57, 43),  // Red (path 4)
+    (22, 160, 133), // Teal (path 5)
 ];
 
 fn path_color(path_id: u64) -> Color32 {
@@ -116,11 +116,11 @@ struct DiagramLayout {
 }
 
 struct PathLaneLayout {
-    left_lanes: HashMap<u64, f32>,   // path_id -> x position
-    right_lanes: HashMap<u64, f32>,  // path_id -> x position
+    left_lanes: HashMap<u64, f32>,  // path_id -> x position
+    right_lanes: HashMap<u64, f32>, // path_id -> x position
     #[allow(dead_code)]
     center_x: f32,
-    use_lanes: bool,  // false if too many paths (>4), falls back to color mode
+    use_lanes: bool, // false if too many paths (>4), falls back to color mode
 }
 
 struct TimeContext<'a> {
@@ -381,7 +381,7 @@ impl SequenceDiagram {
         let left_width = available_width * 0.35;
         let right_width = available_width * 0.35;
 
-        let left_start = rect.left() + 50.0;  // Some margin from edge
+        let left_start = rect.left() + 50.0; // Some margin from edge
         let right_end = rect.right() - 50.0;
 
         let mut left_lanes = HashMap::new();
@@ -449,8 +449,12 @@ impl SequenceDiagram {
                         let packet = &self.cached_packets[idx];
                         if let Some(pid) = packet.path_id {
                             match packet.direction {
-                                PacketDirection::Sent => { left_path_ids.insert(pid); },
-                                PacketDirection::Received => { right_path_ids.insert(pid); },
+                                PacketDirection::Sent => {
+                                    left_path_ids.insert(pid);
+                                }
+                                PacketDirection::Received => {
+                                    right_path_ids.insert(pid);
+                                }
                             }
                         }
                     }
@@ -480,7 +484,13 @@ impl SequenceDiagram {
                 // Draw timelines (need to draw for each lane if in lane mode)
                 if let Some(ref lanes) = lane_layout {
                     if lanes.use_lanes {
-                        draw_lane_timelines(&painter, &layout, timeline_top, timeline_bottom, lanes);
+                        draw_lane_timelines(
+                            &painter,
+                            &layout,
+                            timeline_top,
+                            timeline_bottom,
+                            lanes,
+                        );
                     } else {
                         draw_timelines(&painter, &layout, timeline_top, timeline_bottom);
                     }
@@ -560,7 +570,11 @@ impl SequenceDiagram {
                 .filter(|p| p.direction == PacketDirection::Received)
                 .map(|p| {
                     (
-                        (p.packet_type.clone(), p.packet_number, p.path_id.unwrap_or(0)),
+                        (
+                            p.packet_type.clone(),
+                            p.packet_number,
+                            p.path_id.unwrap_or(0),
+                        ),
                         p.time,
                     )
                 })
@@ -581,7 +595,11 @@ impl SequenceDiagram {
                 .filter(|p| p.direction == PacketDirection::Sent)
             {
                 let recv_time = recv_times
-                    .get(&(p.packet_type.clone(), p.packet_number, p.path_id.unwrap_or(0)))
+                    .get(&(
+                        p.packet_type.clone(),
+                        p.packet_number,
+                        p.path_id.unwrap_or(0),
+                    ))
                     .copied();
                 arrows.push(DualArrow {
                     send_time: p.time,
@@ -800,12 +818,28 @@ impl SequenceDiagram {
                 // Draw timelines (need to draw for each lane if in lane mode)
                 if let Some(ref lanes) = lane_layout {
                     if lanes.use_lanes {
-                        draw_lane_timelines(&painter, &layout, layout.top_y, layout.top_y + total_content_height, lanes);
+                        draw_lane_timelines(
+                            &painter,
+                            &layout,
+                            layout.top_y,
+                            layout.top_y + total_content_height,
+                            lanes,
+                        );
                     } else {
-                        draw_timelines(&painter, &layout, layout.top_y, layout.top_y + total_content_height);
+                        draw_timelines(
+                            &painter,
+                            &layout,
+                            layout.top_y,
+                            layout.top_y + total_content_height,
+                        );
                     }
                 } else {
-                    draw_timelines(&painter, &layout, layout.top_y, layout.top_y + total_content_height);
+                    draw_timelines(
+                        &painter,
+                        &layout,
+                        layout.top_y,
+                        layout.top_y + total_content_height,
+                    );
                 }
 
                 let time_ctx = TimeContext {
@@ -827,8 +861,14 @@ impl SequenceDiagram {
                 }
 
                 let send_time_counts = Self::count_simultaneous_sends(arrows);
-                let arrow_rects =
-                    self.draw_dual_arrows(&painter, &layout, arrows, &send_time_counts, &time_to_y, lane_layout.as_ref());
+                let arrow_rects = self.draw_dual_arrows(
+                    &painter,
+                    &layout,
+                    arrows,
+                    &send_time_counts,
+                    &time_to_y,
+                    lane_layout.as_ref(),
+                );
 
                 self.handle_dual_selection(
                     ui,
@@ -841,10 +881,7 @@ impl SequenceDiagram {
                 self.draw_selection_indicator(&painter, &layout, viewport, arrow_rects.len());
 
                 // Collect unique path_ids for legend
-                let mut path_ids: Vec<u64> = arrows
-                    .iter()
-                    .filter_map(|a| a.path_id)
-                    .collect();
+                let mut path_ids: Vec<u64> = arrows.iter().filter_map(|a| a.path_id).collect();
                 path_ids.sort_unstable();
                 path_ids.dedup();
 
@@ -883,12 +920,28 @@ impl SequenceDiagram {
                     // Use lane positions
                     let path_id = arrow.path_id.unwrap_or(0);
                     if arrow.from_left {
-                        let start = lanes.left_lanes.get(&path_id).copied().unwrap_or(layout.left_x);
-                        let end = lanes.right_lanes.get(&path_id).copied().unwrap_or(layout.right_x);
+                        let start = lanes
+                            .left_lanes
+                            .get(&path_id)
+                            .copied()
+                            .unwrap_or(layout.left_x);
+                        let end = lanes
+                            .right_lanes
+                            .get(&path_id)
+                            .copied()
+                            .unwrap_or(layout.right_x);
                         (start, end)
                     } else {
-                        let start = lanes.right_lanes.get(&path_id).copied().unwrap_or(layout.right_x);
-                        let end = lanes.left_lanes.get(&path_id).copied().unwrap_or(layout.left_x);
+                        let start = lanes
+                            .right_lanes
+                            .get(&path_id)
+                            .copied()
+                            .unwrap_or(layout.right_x);
+                        let end = lanes
+                            .left_lanes
+                            .get(&path_id)
+                            .copied()
+                            .unwrap_or(layout.left_x);
                         (start, end)
                     }
                 } else {
@@ -980,7 +1033,10 @@ impl SequenceDiagram {
 
             let info_offset = if arrow.from_left { 5.0 } else { -5.0 };
             let label = if let Some(pid) = arrow.path_id {
-                format!("{}:{} p{}", arrow.packet_type_short, arrow.packet_number, pid)
+                format!(
+                    "{}:{} p{}",
+                    arrow.packet_type_short, arrow.packet_number, pid
+                )
             } else {
                 format!("{}:{}", arrow.packet_type_short, arrow.packet_number)
             };
@@ -1479,44 +1535,46 @@ fn draw_single_packet(
             let path_id = packet.path_id.unwrap_or(0);
             match packet.direction {
                 PacketDirection::Sent => {
-                    let start = lanes.left_lanes.get(&path_id).copied().unwrap_or(layout.left_x);
-                    let end = lanes.right_lanes.get(&path_id).copied().unwrap_or(layout.right_x);
+                    let start = lanes
+                        .left_lanes
+                        .get(&path_id)
+                        .copied()
+                        .unwrap_or(layout.left_x);
+                    let end = lanes
+                        .right_lanes
+                        .get(&path_id)
+                        .copied()
+                        .unwrap_or(layout.right_x);
                     (start, end, y_start + diagonal_offset)
-                },
+                }
                 PacketDirection::Received => {
-                    let start = lanes.right_lanes.get(&path_id).copied().unwrap_or(layout.right_x);
-                    let end = lanes.left_lanes.get(&path_id).copied().unwrap_or(layout.left_x);
+                    let start = lanes
+                        .right_lanes
+                        .get(&path_id)
+                        .copied()
+                        .unwrap_or(layout.right_x);
+                    let end = lanes
+                        .left_lanes
+                        .get(&path_id)
+                        .copied()
+                        .unwrap_or(layout.left_x);
                     (start, end, y_start + diagonal_offset)
-                },
+                }
             }
         } else {
             // Fallback to color mode
             match packet.direction {
-                PacketDirection::Sent => (
-                    layout.left_x,
-                    layout.right_x,
-                    y_start + diagonal_offset,
-                ),
-                PacketDirection::Received => (
-                    layout.right_x,
-                    layout.left_x,
-                    y_start + diagonal_offset,
-                ),
+                PacketDirection::Sent => (layout.left_x, layout.right_x, y_start + diagonal_offset),
+                PacketDirection::Received => {
+                    (layout.right_x, layout.left_x, y_start + diagonal_offset)
+                }
             }
         }
     } else {
         // Default positioning (color mode)
         match packet.direction {
-            PacketDirection::Sent => (
-                layout.left_x,
-                layout.right_x,
-                y_start + diagonal_offset,
-            ),
-            PacketDirection::Received => (
-                layout.right_x,
-                layout.left_x,
-                y_start + diagonal_offset,
-            ),
+            PacketDirection::Sent => (layout.left_x, layout.right_x, y_start + diagonal_offset),
+            PacketDirection::Received => (layout.right_x, layout.left_x, y_start + diagonal_offset),
         }
     };
 
@@ -1558,7 +1616,10 @@ fn draw_single_packet(
         start_x + 8.0
     };
     let label = if let Some(pid) = packet.path_id {
-        format!("{}:{} p{}", packet.packet_type_short, packet.packet_number, pid)
+        format!(
+            "{}:{} p{}",
+            packet.packet_type_short, packet.packet_number, pid
+        )
     } else {
         format!("{}:{}", packet.packet_type_short, packet.packet_number)
     };
@@ -1816,10 +1877,7 @@ fn draw_path_legend(painter: &Painter, rect: Rect, viewport: Rect, path_ids: &[u
         let color = path_color(path_id);
 
         // Color box
-        let box_rect = Rect::from_min_size(
-            Pos2::new(legend_x + 8.0, y),
-            Vec2::new(14.0, 14.0),
-        );
+        let box_rect = Rect::from_min_size(Pos2::new(legend_x + 8.0, y), Vec2::new(14.0, 14.0));
         painter.rect_filled(box_rect, 2.0, color);
         painter.rect_stroke(
             box_rect,

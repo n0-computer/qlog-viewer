@@ -182,12 +182,8 @@ impl ConnectionStats {
     fn estimate_frame_size(frame: &qlog::events::quic::QuicFrame) -> u64 {
         use qlog::events::quic::QuicFrame;
         match frame {
-            QuicFrame::Stream { raw, .. } => {
-                raw.as_ref().and_then(|r| r.length).unwrap_or(0) + 3
-            }
-            QuicFrame::Crypto { raw, .. } => {
-                raw.as_ref().and_then(|r| r.length).unwrap_or(0) + 2
-            }
+            QuicFrame::Stream { raw, .. } => raw.as_ref().and_then(|r| r.length).unwrap_or(0) + 3,
+            QuicFrame::Crypto { raw, .. } => raw.as_ref().and_then(|r| r.length).unwrap_or(0) + 2,
             QuicFrame::Ack { .. } => 20, // Estimate for ACK frame
             QuicFrame::Padding { .. } => 1,
             QuicFrame::Ping { .. } => 1,

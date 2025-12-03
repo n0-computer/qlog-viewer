@@ -136,7 +136,8 @@ impl PacketCorrelation {
                     if let Some(pn) = header.packet_number {
                         let path_id = header.path_id.unwrap_or(0);
                         let packet_type = format!("{:?}", header.packet_type);
-                        self.lost_packets.insert((path_id, packet_type, pn), event.time);
+                        self.lost_packets
+                            .insert((path_id, packet_type, pn), event.time);
                     }
                 }
             }
@@ -155,7 +156,11 @@ impl PacketCorrelation {
                         let packet_types = ["OneRtt", "Initial", "Handshake", "ZeroRtt"];
                         'outer: for packet_type in &packet_types {
                             for path_id in 0..=255 {
-                                if let Some(sent) = self.sent_packets.get_mut(&(path_id, packet_type.to_string(), pn)) {
+                                if let Some(sent) = self.sent_packets.get_mut(&(
+                                    path_id,
+                                    packet_type.to_string(),
+                                    pn,
+                                )) {
                                     if sent.ack_time.is_none() {
                                         sent.ack_time = Some(event.time);
                                         sent.rtt = Some(event.time - sent.time);
@@ -197,7 +202,10 @@ impl PacketCorrelation {
 
                 for pn in pns {
                     // ACK in this packet space acknowledges packets in the same packet space
-                    if let Some(sent) = self.sent_packets.get_mut(&(path_id, packet_type.clone(), pn)) {
+                    if let Some(sent) =
+                        self.sent_packets
+                            .get_mut(&(path_id, packet_type.clone(), pn))
+                    {
                         if sent.ack_time.is_none() {
                             sent.ack_time = Some(event.time);
                             sent.rtt = Some(event.time - sent.time);
@@ -292,7 +300,8 @@ impl PacketCorrelation {
     }
 
     pub fn is_packet_lost(&self, path_id: u64, packet_type: &str, packet_number: u64) -> bool {
-        self.lost_packets.contains_key(&(path_id, packet_type.to_string(), packet_number))
+        self.lost_packets
+            .contains_key(&(path_id, packet_type.to_string(), packet_number))
     }
 
     pub fn get_rtt(&self, path_id: u64, packet_type: &str, packet_number: u64) -> Option<f32> {
