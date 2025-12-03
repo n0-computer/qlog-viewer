@@ -182,34 +182,6 @@ impl QlogViewerApp {
                     }
                     ui.separator();
                     ui.checkbox(&mut self.show_event_detail, "Show Event Detail Panel");
-
-                    // Multipath visualization mode toggle
-                    if self.view_mode == ViewMode::SequenceDiagram {
-                        ui.separator();
-                        ui.label("Multipath Visualization:");
-                        if ui
-                            .radio(
-                                self.sequence_diagram.visualization_mode
-                                    == crate::sequence_diagram::VisualizationMode::ColorCoded,
-                                "Color-Coded",
-                            )
-                            .clicked()
-                        {
-                            self.sequence_diagram.visualization_mode =
-                                crate::sequence_diagram::VisualizationMode::ColorCoded;
-                        }
-                        if ui
-                            .radio(
-                                self.sequence_diagram.visualization_mode
-                                    == crate::sequence_diagram::VisualizationMode::VerticalLanes,
-                                "Vertical Lanes",
-                            )
-                            .clicked()
-                        {
-                            self.sequence_diagram.visualization_mode =
-                                crate::sequence_diagram::VisualizationMode::VerticalLanes;
-                        }
-                    }
                 });
 
                 ui.separator();
@@ -469,6 +441,35 @@ impl QlogViewerApp {
         let current_selection = *selected_event_idx;
         let mut new_selection = current_selection;
 
+        // Handle arrow key navigation
+        let (up_pressed, down_pressed) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+            )
+        });
+
+        if up_pressed || down_pressed {
+            if let Some(current_idx) = current_selection {
+                // Find the position of the current selection in filtered events
+                if let Some(current_pos) = filtered_events
+                    .iter()
+                    .position(|(idx, _)| *idx == current_idx)
+                {
+                    if up_pressed && current_pos > 0 {
+                        new_selection = Some(filtered_events[current_pos - 1].0);
+                    } else if down_pressed && current_pos + 1 < filtered_events.len() {
+                        new_selection = Some(filtered_events[current_pos + 1].0);
+                    }
+                }
+            } else if !filtered_events.is_empty() {
+                // No selection yet, select first item on down arrow
+                if down_pressed {
+                    new_selection = Some(filtered_events[0].0);
+                }
+            }
+        }
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, 20.0, filtered_events.len(), |ui, row_range| {
@@ -480,15 +481,34 @@ impl QlogViewerApp {
                             if let Some((actual_idx, event)) = filtered_events.get(row_idx) {
                                 let is_selected = current_selection == Some(*actual_idx);
 
-                                let response =
-                                    ui.selectable_label(is_selected, format!("{}", row_idx));
-                                if response.clicked() {
+                                // Make entire row clickable by using horizontal layout with selectable_label
+                                ui.horizontal(|ui| {
+                                    let response =
+                                        ui.selectable_label(is_selected, format!("{}", row_idx));
+                                    if response.clicked() {
+                                        new_selection = Some(*actual_idx);
+                                    }
+                                });
+
+                                // Make each cell clickable
+                                let time_response =
+                                    ui.selectable_label(is_selected, data.format_time(event));
+                                if time_response.clicked() {
                                     new_selection = Some(*actual_idx);
                                 }
 
-                                ui.label(data.format_time(event));
-                                ui.label(data.get_event_name(event));
-                                ui.label(data.get_event_summary(event));
+                                let name_response =
+                                    ui.selectable_label(is_selected, data.get_event_name(event));
+                                if name_response.clicked() {
+                                    new_selection = Some(*actual_idx);
+                                }
+
+                                let summary_response =
+                                    ui.selectable_label(is_selected, data.get_event_summary(event));
+                                if summary_response.clicked() {
+                                    new_selection = Some(*actual_idx);
+                                }
+
                                 ui.end_row();
                             }
                         }
@@ -798,6 +818,21 @@ impl QlogViewerApp {
 
 impl eframe::App for QlogViewerApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Handle number key shortcuts for view switching
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Num1) {
+                self.view_mode = ViewMode::EventList;
+            } else if i.key_pressed(egui::Key::Num2) {
+                self.view_mode = ViewMode::SequenceDiagram;
+            } else if i.key_pressed(egui::Key::Num3) {
+                self.view_mode = ViewMode::CongestionGraph;
+            } else if i.key_pressed(egui::Key::Num4) {
+                self.view_mode = ViewMode::PacketizationDiagram;
+            } else if i.key_pressed(egui::Key::Num5) {
+                self.view_mode = ViewMode::StatsView;
+            }
+        });
+
         self.render_menu_bar(ctx);
         self.render_event_detail(ctx);
         self.render_main_content(ctx);

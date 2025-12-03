@@ -3,8 +3,8 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result};
 use convert_case::{Case, Casing};
 use qlog::{
-    Trace,
     events::{Event, EventData, EventType},
+    Trace,
 };
 use serde::Deserialize;
 use tracing::{error, info, warn};
