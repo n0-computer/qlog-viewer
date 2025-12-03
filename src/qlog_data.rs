@@ -218,7 +218,10 @@ impl QlogData {
             EventData::ConnectionClosed(_) => "connectivity:connection_closed",
             EventData::ConnectionStateUpdated(_) => "connectivity:connection_state_updated",
             EventData::VersionInformation(_) => "transport:version_information",
-            EventData::AlpnInformation(_) => "transport:alpn_information",
+            EventData::AlpnInformation(_) => {
+                "transport:alpn_inf
+ormation"
+            }
             _ => "unknown",
         }
         .to_string()

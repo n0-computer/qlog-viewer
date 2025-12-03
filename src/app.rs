@@ -540,6 +540,7 @@ impl QlogViewerApp {
                 };
 
                 ui.heading(format!("Event #{} - {}", idx, data.get_event_name(event)));
+
                 ui.separator();
 
                 ui.label(format!("Time: {}", data.format_time(event)));
@@ -1324,6 +1325,113 @@ fn render_frame(ui: &mut egui::Ui, event_id: usize, frame_id: usize, frame: &Qui
                         if let Some(raw) = raw {
                             render_raw_info(ui, raw);
                         }
+                    }
+                    AckFrequency {
+                        sequence_number,
+                        ack_eliciting_threshold,
+                        requested_max_ack_delay,
+                        reordering_threshold,
+                        raw,
+                    } => {
+                        ui.label("Seq Number");
+                        ui.label(format!("{sequence_number}"));
+                        ui.end_row();
+                        ui.label("Ack Eliciting Threshold");
+                        ui.label(format!("{ack_eliciting_threshold}"));
+                        ui.end_row();
+                        ui.label("Requested Max Ack Delay");
+                        ui.label(format!("{requested_max_ack_delay}"));
+                        ui.end_row();
+                        ui.label("Reordering Threshold");
+                        ui.label(format!("{reordering_threshold}"));
+                        ui.end_row();
+
+                        if let Some(raw) = raw {
+                            render_raw_info(ui, raw);
+                        }
+                    }
+                    ImmediateAck { raw } => {
+                        if let Some(raw) = raw {
+                            render_raw_info(ui, raw);
+                        }
+                    }
+                    ObservedAddress {
+                        sequence_number,
+                        ip_v4,
+                        ip_v6,
+                        port,
+                        raw,
+                    } => {
+                        ui.label("Seq Number");
+                        ui.label(format!("{sequence_number}"));
+                        ui.end_row();
+                        if let Some(ip) = ip_v4 {
+                            ui.label("IP V4");
+                            ui.label(ip);
+                            ui.end_row();
+                        }
+                        if let Some(ip) = ip_v6 {
+                            ui.label("IP V6");
+                            ui.label(ip);
+                            ui.end_row();
+                        }
+                        ui.label("Port");
+                        ui.label(format!("{port}"));
+                        ui.end_row();
+                        if let Some(raw) = raw {
+                            render_raw_info(ui, raw);
+                        }
+                    }
+                    AddAddress {
+                        sequence_number,
+                        ip_v4,
+                        ip_v6,
+                        port,
+                    } => {
+                        ui.label("Seq Number");
+                        ui.label(format!("{sequence_number}"));
+                        ui.end_row();
+                        if let Some(ip) = ip_v4 {
+                            ui.label("IP V4");
+                            ui.label(ip);
+                            ui.end_row();
+                        }
+                        if let Some(ip) = ip_v6 {
+                            ui.label("IP V6");
+                            ui.label(ip);
+                            ui.end_row();
+                        }
+                        ui.label("Port");
+                        ui.label(format!("{port}"));
+                        ui.end_row();
+                    }
+                    ReachOut {
+                        round,
+                        ip_v4,
+                        ip_v6,
+                        port,
+                    } => {
+                        ui.label("round");
+                        ui.label(format!("{round}"));
+                        ui.end_row();
+                        if let Some(ip) = ip_v4 {
+                            ui.label("IP V4");
+                            ui.label(ip);
+                            ui.end_row();
+                        }
+                        if let Some(ip) = ip_v6 {
+                            ui.label("IP V6");
+                            ui.label(ip);
+                            ui.end_row();
+                        }
+                        ui.label("Port");
+                        ui.label(format!("{port}"));
+                        ui.end_row();
+                    }
+                    RemoveAddress { sequence_number } => {
+                        ui.label("Seq Number");
+                        ui.label(format!("{sequence_number}"));
+                        ui.end_row();
                     }
                     Unknown {
                         frame_type_bytes,

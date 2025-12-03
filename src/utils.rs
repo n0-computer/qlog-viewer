@@ -34,6 +34,12 @@ pub enum FrameType {
     ConnectionClose,
     HandshakeDone,
     Datagram,
+    AckFrequency,
+    ImmediateAck,
+    ObservedAddress,
+    AddAddress,
+    ReachOut,
+    RemoveAddress,
     Custom(String),
 }
 
@@ -71,6 +77,12 @@ impl FrameType {
             QuicFrame::ConnectionClose { .. } => Self::ConnectionClose,
             QuicFrame::HandshakeDone { .. } => Self::HandshakeDone,
             QuicFrame::Datagram { .. } => Self::Datagram,
+            QuicFrame::AckFrequency { .. } => Self::AckFrequency,
+            QuicFrame::ImmediateAck { .. } => Self::ImmediateAck,
+            QuicFrame::ObservedAddress { .. } => Self::ObservedAddress,
+            QuicFrame::AddAddress { .. } => Self::AddAddress,
+            QuicFrame::ReachOut { .. } => Self::ReachOut,
+            QuicFrame::RemoveAddress { .. } => Self::RemoveAddress,
             QuicFrame::Unknown {
                 frame_type_bytes,
                 raw,
@@ -122,6 +134,12 @@ impl FrameType {
             Self::ConnectionClose => "CONNECTION_CLOSE".to_string(),
             Self::HandshakeDone => "HANDSHAKE_DONE".to_string(),
             Self::Datagram => "DATAGRAM".to_string(),
+            Self::AckFrequency => "ACK_FREQUENCY".to_string(),
+            Self::ImmediateAck => "IMMEDIATE_ACK".to_string(),
+            Self::ObservedAddress => "OBSERVED_ADDRESS".to_string(),
+            Self::AddAddress => "ADD_ADDRESS".to_string(),
+            Self::ReachOut => "REACH_OUT".to_string(),
+            Self::RemoveAddress => "REMOVE_ADDRESS".to_string(),
             Self::Custom(name) => name.to_uppercase(),
         }
     }
@@ -157,6 +175,12 @@ impl FrameType {
             Self::ConnectionClose => "CLS".to_string(),
             Self::HandshakeDone => "HSD".to_string(),
             Self::Datagram => "DGM".to_string(),
+            Self::AckFrequency => "ACF".to_string(),
+            Self::ImmediateAck => "IAC".to_string(),
+            Self::ObservedAddress => "OAD".to_string(),
+            Self::AddAddress => "AAD".to_string(),
+            Self::ReachOut => "ROU".to_string(),
+            Self::RemoveAddress => "RAD".to_string(),
             Self::Custom(name) => derive_short_name(name),
         }
     }

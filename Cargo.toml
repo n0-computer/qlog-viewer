@@ -21,7 +21,7 @@ egui_extras = { version = "0.33", features = ["all_loaders"] }
 egui_plot = "0.34"
 
 # qlog parsing
-qlog = { package = "n0-qlog", git = "https://github.com/n0-computer/n0-qlog", branch = "qlog-11-multipath" }
+qlog = { package = "n0-qlog", git = "https://github.com/n0-computer/n0-qlog", branch = "qlog-11-nat-traversal" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sonic-rs = "0.5"
