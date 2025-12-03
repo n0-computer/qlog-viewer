@@ -700,10 +700,13 @@ impl SequenceDiagram {
 
             ui.separator();
             ui.label("Time Scale:");
-            ui.add(
-                egui::Slider::new(&mut self.dual_time_scale, 0.5..=100.0)
+            ui.add_sized(
+                [350.0, 20.0],
+                egui::Slider::new(&mut self.dual_time_scale, 0.5..=2500.0)
                     .logarithmic(true)
-                    .suffix(" px/ms"),
+                    .suffix(" px/ms")
+                    .min_decimals(1)
+                    .max_decimals(1),
             );
 
             ui.separator();
