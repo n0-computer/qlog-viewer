@@ -6,8 +6,9 @@ use qlog::{
     events::{Event, EventData, EventType},
     Trace,
 };
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::Deserialize;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 #[derive(Deserialize)]
 struct QlogFileSeq {
@@ -93,46 +94,21 @@ impl QlogData {
     pub fn from_ndjson(ndjson: &str) -> Result<Self> {
         info!("Parsing NDJSON qlog...");
 
-        let mut lines = ndjson.lines();
-
-        let first_line = lines
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Empty NDJSON file"))?;
-
-        let header: QlogFileSeq = serde_json::from_str(first_line)
-            .map_err(|e| {
-                error!("Serde error: {}", e);
-                e
-            })
-            .with_context(|| {
-                format!(
-                    "Failed to parse qlog header from: {}",
-                    &first_line[..first_line.len().min(200)]
-                )
-            })?;
-
-        info!(
-            "Parsed trace header (version: {:?}, format: {:?})",
-            header.qlog_version, header.qlog_format
-        );
-
-        let events = Self::parse_event_lines(lines);
-        info!("Parsed {} events", events.len());
-
-        Ok(Self { events })
+        let lines = ndjson.lines().filter(|s| !s.is_empty());
+        Self::from_json_lines(lines)
     }
 
     pub fn from_json_seq(json_seq: &str) -> Result<Self> {
         info!("Parsing RFC 7464 JSON-SEQ qlog...");
-
-        let records: Vec<&str> = json_seq
+        let lines = json_seq
             .split('\x1E')
-            .filter(|s| !s.trim().is_empty())
-            .collect();
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        Self::from_json_lines(lines)
+    }
 
-        info!("Found {} JSON-SEQ records", records.len());
-
-        let header: QlogFileSeq = if let Some(first_record) = records.first() {
+    pub fn from_json_lines<'a>(mut records: impl Iterator<Item = &'a str>) -> Result<Self> {
+        let header: QlogFileSeq = if let Some(first_record) = records.next() {
             serde_json::from_str(first_record.trim()).with_context(|| {
                 format!(
                     "Failed to parse qlog trace header from: {}",
@@ -148,52 +124,26 @@ impl QlogData {
             header.qlog_version, header.qlog_format
         );
 
-        let mut events = Vec::new();
-        for (idx, record) in records.iter().skip(1).enumerate() {
-            let record = record.trim_start_matches('\n');
-            // Normalize event namespace for compatibility
-            let normalized = Self::normalize_event_namespace(record);
-            match serde_json::from_str::<Event>(&normalized) {
-                Ok(event) => events.push(event),
-                Err(e) => {
-                    warn!("Failed to parse event {}: {}", idx, e);
-                }
-            }
-        }
-
-        info!("Parsed {} events", events.len());
-        Ok(Self { events })
-    }
-
-    fn parse_event_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Event> {
-        let mut events = Vec::new();
-        let mut parse_errors = 0;
-
-        for (idx, line) in lines.enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            // Normalize event namespace for compatibility with both formats
-            let normalized = Self::normalize_event_namespace(line);
-
-            match serde_json::from_str::<Event>(&normalized) {
-                Ok(event) => events.push(event),
-                Err(e) => {
-                    parse_errors += 1;
-                    if parse_errors <= 5 {
+        let events: Vec<Event> = records
+            .collect::<Vec<&str>>()
+            .par_iter()
+            .enumerate()
+            .filter_map(|(idx, record)| {
+                let record = record.trim_start_matches('\n');
+                // Normalize event namespace for compatibility
+                let normalized = Self::normalize_event_namespace(record);
+                match serde_json::from_str::<Event>(&normalized) {
+                    Ok(event) => Some(event),
+                    Err(e) => {
+                        // logging from multiple threads is fine, but messages may interleave
                         warn!("Failed to parse event {}: {}", idx, e);
+                        None
                     }
                 }
-            }
-        }
-
-        if parse_errors > 5 {
-            warn!("Total parse errors: {} (showing first 5)", parse_errors);
-        }
-
-        events
+            })
+            .collect();
+        info!("Parsed {} events", events.len());
+        Ok(Self { events })
     }
 
     pub fn get_event_name(&self, event: &Event) -> String {
