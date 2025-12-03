@@ -11,9 +11,9 @@ use egui::{
     CentralPanel, CollapsingHeader, Context, FontFamily, FontId, SidePanel, TextFormat,
     TopBottomPanel,
 };
-use qlog::events::quic::PacketHeader;
 use qlog::events::RawInfo;
-use qlog::events::{quic::QuicFrame, Event, EventData};
+use qlog::events::quic::PacketHeader;
+use qlog::events::{Event, EventData, quic::QuicFrame};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use tracing::{error, info};
@@ -1506,8 +1506,11 @@ fn render_header(ui: &mut egui::Ui, event: &EventData) {
 }
 
 fn render_inner_header(ui: &mut egui::Ui, header: &PacketHeader) {
-    ui.label(format!("Type: {:?}", header.packet_type));
+    ui.label(format!("Packet Space: {:?}", header.packet_type));
     if let Some(pn) = header.packet_number {
-        ui.label(format!("Number: {pn}"));
+        ui.label(format!("Packet Number: {pn}"));
+    }
+    if let Some(pid) = header.path_id {
+        ui.label(format!("Path Id: {pid}"));
     }
 }
