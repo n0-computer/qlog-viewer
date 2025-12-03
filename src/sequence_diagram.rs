@@ -105,7 +105,8 @@ struct DualArrow {
     path_id: Option<u64>,
     frames: Vec<FrameType>,
     is_lost: bool,
-    event_idx: usize,
+    sent_event_idx: usize,         // Index in the sending file
+    recv_event_idx: Option<usize>, // Index in the receiving file (None if not received)
 }
 
 struct DiagramLayout {
@@ -193,6 +194,7 @@ impl SequenceDiagram {
         file_a: &LoadedFile,
         file_b: &LoadedFile,
         selected_event_idx: &mut Option<usize>,
+        recv_selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
     ) {
         let (left_file, right_file) = if self.files_swapped {
@@ -228,6 +230,7 @@ impl SequenceDiagram {
             time_range,
             &gaps,
             selected_event_idx,
+            recv_selected_event_idx,
             selected_file_idx,
         );
     }
@@ -564,7 +567,7 @@ impl SequenceDiagram {
         let left_packets = Self::extract_packets(&left_file.qlog_data).packets;
         let right_packets = Self::extract_packets(&right_file.qlog_data).packets;
 
-        let recv_times = |packets: &[PacketInfo]| -> HashMap<(String, u64, u64), f64> {
+        let recv_info = |packets: &[PacketInfo]| -> HashMap<(String, u64, u64), (f64, usize)> {
             packets
                 .iter()
                 .filter(|p| p.direction == PacketDirection::Received)
@@ -575,18 +578,18 @@ impl SequenceDiagram {
                             p.packet_number,
                             p.path_id.unwrap_or(0),
                         ),
-                        p.time,
+                        (p.time, p.event_idx),
                     )
                 })
                 .collect()
         };
 
-        let left_recv = recv_times(&left_packets);
-        let right_recv = recv_times(&right_packets);
+        let left_recv = recv_info(&left_packets);
+        let right_recv = recv_info(&right_packets);
 
         let mut arrows: Vec<DualArrow> = Vec::new();
 
-        for (packets, recv_times, from_left) in [
+        for (packets, recv_info, from_left) in [
             (&left_packets, &right_recv, true),
             (&right_packets, &left_recv, false),
         ] {
@@ -594,23 +597,30 @@ impl SequenceDiagram {
                 .iter()
                 .filter(|p| p.direction == PacketDirection::Sent)
             {
-                let recv_time = recv_times
+                let recv_data = recv_info
                     .get(&(
                         p.packet_type.clone(),
                         p.packet_number,
                         p.path_id.unwrap_or(0),
                     ))
                     .copied();
+
+                let (recv_time, recv_event_idx) = match recv_data {
+                    Some((time, idx)) => (time, Some(idx)),
+                    None => (p.time, None),
+                };
+
                 arrows.push(DualArrow {
                     send_time: p.time,
-                    recv_time: recv_time.unwrap_or(p.time),
+                    recv_time,
                     from_left,
                     packet_type_short: p.packet_type_short.clone(),
                     packet_number: p.packet_number,
                     path_id: p.path_id,
                     frames: p.frames.clone(),
-                    is_lost: recv_time.is_none(),
-                    event_idx: p.event_idx,
+                    is_lost: recv_event_idx.is_none(),
+                    sent_event_idx: p.event_idx,
+                    recv_event_idx,
                 });
             }
         }
@@ -749,6 +759,7 @@ impl SequenceDiagram {
         time_range: f64,
         gaps: &[TimeGap],
         selected_event_idx: &mut Option<usize>,
+        recv_selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
     ) {
         let pixels_per_ms = self.dual_time_scale;
@@ -875,6 +886,7 @@ impl SequenceDiagram {
                     &response,
                     &arrow_rects,
                     selected_event_idx,
+                    recv_selected_event_idx,
                     selected_file_idx,
                 );
 
@@ -906,7 +918,7 @@ impl SequenceDiagram {
         send_time_counts: &HashMap<i64, usize>,
         time_to_y: &impl Fn(f64) -> f32,
         lane_layout: Option<&PathLaneLayout>,
-    ) -> Vec<(usize, usize, bool, Rect)> {
+    ) -> Vec<(usize, usize, Option<usize>, bool, Rect)> {
         let mut arrow_rects = Vec::new();
         let mut send_time_indices: HashMap<i64, usize> = HashMap::new();
 
@@ -1081,7 +1093,13 @@ impl SequenceDiagram {
                     y_send_adjusted.max(actual_end_y) + 12.0,
                 ),
             );
-            arrow_rects.push((arrow_idx, arrow.event_idx, arrow.from_left, arrow_rect));
+            arrow_rects.push((
+                arrow_idx,
+                arrow.sent_event_idx,
+                arrow.recv_event_idx,
+                arrow.from_left,
+                arrow_rect,
+            ));
         }
 
         arrow_rects
@@ -1091,20 +1109,22 @@ impl SequenceDiagram {
         &mut self,
         ui: &egui::Ui,
         response: &Response,
-        arrow_rects: &[(usize, usize, bool, Rect)],
+        arrow_rects: &[(usize, usize, Option<usize>, bool, Rect)],
         selected_event_idx: &mut Option<usize>,
+        recv_selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
     ) {
         let total_arrows = arrow_rects.len();
 
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
-                if let Some((idx, event_idx, from_left, _)) = arrow_rects
+                if let Some((idx, sent_event_idx, recv_event_idx, from_left, _)) = arrow_rects
                     .iter()
-                    .find(|(_, _, _, rect)| rect.contains(pos))
+                    .find(|(_, _, _, _, rect)| rect.contains(pos))
                 {
                     self.selected_packet_idx = Some(*idx);
-                    *selected_event_idx = Some(*event_idx);
+                    *selected_event_idx = Some(*sent_event_idx);
+                    *recv_selected_event_idx = *recv_event_idx;
                     *selected_file_idx = if *from_left { 0 } else { 1 };
                 }
             }
@@ -1131,10 +1151,11 @@ impl SequenceDiagram {
 
             if new_idx != current_idx || self.selected_packet_idx.is_none() {
                 self.selected_packet_idx = Some(new_idx);
-                if let Some((_, event_idx, from_left, _)) =
-                    arrow_rects.iter().find(|(idx, _, _, _)| *idx == new_idx)
+                if let Some((_, sent_event_idx, recv_event_idx, from_left, _)) =
+                    arrow_rects.iter().find(|(idx, _, _, _, _)| *idx == new_idx)
                 {
-                    *selected_event_idx = Some(*event_idx);
+                    *selected_event_idx = Some(*sent_event_idx);
+                    *recv_selected_event_idx = *recv_event_idx;
                     *selected_file_idx = if *from_left { 0 } else { 1 };
                 }
             }
