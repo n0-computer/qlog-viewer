@@ -75,6 +75,13 @@ pub struct SequenceDiagram {
     files_swapped: bool,
     compress_gaps: bool,
     pub visualization_mode: VisualizationMode,
+    // Metrics events visualization
+    metrics_events: Vec<MetricsEvent>,
+    pub show_metrics_events: bool,
+    pub show_all_metrics: bool,
+    pub metrics_visualization_mode: MetricsVisualizationMode,
+    selected_metrics_event: Option<usize>,
+    last_metrics: Option<LastMetricsState>,
 }
 
 const GAP_THRESHOLD_MS: f64 = 5.0;
@@ -85,6 +92,84 @@ struct TimeGap {
     start_time: f64,
     end_time: f64,
     compressed_amount: f64,
+}
+
+#[derive(Debug, Clone)]
+struct LastMetricsState {
+    smoothed_rtt: Option<f32>,
+    bytes_in_flight: Option<u64>,
+    congestion_window: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsDisplayStyle {
+    Box,    // Colored box in margin (for important events)
+    Marker, // Small shape on timeline (for frequent events)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsVisualizationMode {
+    Events, // Show boxes and markers for events
+    Graphs, // Show vertical line graphs for metrics
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsEventType {
+    ConnectionStarted,
+    ConnectionStateUpdated,
+    MetricsUpdated,
+    CongestionStateUpdated,
+    PacketLost,
+}
+
+impl MetricsEventType {
+    fn color(&self) -> Color32 {
+        match self {
+            Self::ConnectionStarted => Color32::from_rgb(0, 150, 136), // Teal
+            Self::ConnectionStateUpdated => Color32::from_rgb(0, 150, 136), // Teal
+            Self::MetricsUpdated => Color32::from_rgb(142, 68, 173),   // Purple
+            Self::CongestionStateUpdated => Color32::from_rgb(255, 152, 0), // Orange
+            Self::PacketLost => Color32::from_rgb(244, 67, 54),        // Red
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::ConnectionStarted => "Connection Started",
+            Self::ConnectionStateUpdated => "Connection State",
+            Self::MetricsUpdated => "Metrics Updated",
+            Self::CongestionStateUpdated => "Congestion State",
+            Self::PacketLost => "Packet Lost",
+        }
+    }
+
+    // Determine display style based on event type
+    fn display_style(&self) -> MetricsDisplayStyle {
+        match self {
+            // Important events: display as boxes
+            Self::ConnectionStarted
+            | Self::ConnectionStateUpdated
+            | Self::CongestionStateUpdated
+            | Self::PacketLost => MetricsDisplayStyle::Box,
+            // Frequent events: display as markers
+            Self::MetricsUpdated => MetricsDisplayStyle::Marker,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetricsEvent {
+    pub time: f64,
+    pub event_type: MetricsEventType,
+    pub display_text: String,
+    pub detail_text: String, // Full details for popup/tooltip
+    pub color: Color32,
+    pub event_idx: usize,
+    pub display_style: MetricsDisplayStyle,
+    // Metric values for graph rendering
+    pub smoothed_rtt: Option<f32>,
+    pub bytes_in_flight: Option<u64>,
+    pub congestion_window: Option<u64>,
 }
 
 struct DualArrow {
@@ -133,6 +218,12 @@ impl SequenceDiagram {
             files_swapped: false,
             compress_gaps: true,
             visualization_mode: VisualizationMode::ColorCoded,
+            metrics_events: Vec::new(),
+            show_metrics_events: true, // Default: visible
+            show_all_metrics: true,    // Default: show all
+            metrics_visualization_mode: MetricsVisualizationMode::Graphs, // Default: show graphs
+            selected_metrics_event: None,
+            last_metrics: None,
         }
     }
 
@@ -209,6 +300,9 @@ impl SequenceDiagram {
             (file_a, file_b)
         };
 
+        // Extract metrics events from the left file
+        self.extract_metrics_events(&left_file.qlog_data);
+
         let arrows = Self::build_dual_arrows(left_file, right_file);
 
         if arrows.is_empty() {
@@ -247,6 +341,7 @@ impl SequenceDiagram {
         }
         let extracted = Self::extract_packets(qlog_data);
         self.cached_packets = extracted.packets;
+        self.extract_metrics_events(qlog_data);
         self.cache_valid = true;
     }
 
@@ -704,6 +799,9 @@ impl SequenceDiagram {
                 path_ids.dedup();
 
                 draw_path_legend(&painter, layout.rect, viewport, &path_ids);
+
+                // Draw metrics events (boxes and markers)
+                self.draw_metrics_events(&painter, ui, &layout, time_to_y, &viewport);
             });
     }
 
@@ -1064,6 +1162,758 @@ impl SequenceDiagram {
         }
 
         result
+    }
+
+    fn extract_metrics_events(&mut self, qlog: &QlogData) {
+        self.metrics_events.clear();
+        self.last_metrics = None;
+
+        for (idx, event) in qlog.events.iter().enumerate() {
+            let metrics_event = match &event.data {
+                EventData::ConnectionStarted(_) => {
+                    let event_type = MetricsEventType::ConnectionStarted;
+                    Some(MetricsEvent {
+                        time: event.time as f64,
+                        event_type,
+                        display_text: "connection started".to_string(),
+                        detail_text: format!("Connection initiated at {:.3}ms", event.time),
+                        color: event_type.color(),
+                        event_idx: idx,
+                        display_style: event_type.display_style(),
+                        smoothed_rtt: None,
+                        bytes_in_flight: None,
+                        congestion_window: None,
+                    })
+                }
+
+                EventData::MetricsUpdated(data) => {
+                    // Only create event if there's meaningful data
+                    if data.smoothed_rtt.is_some()
+                        || data.bytes_in_flight.is_some()
+                        || data.congestion_window.is_some()
+                    {
+                        let event_type = MetricsEventType::MetricsUpdated;
+
+                        // Format short display text
+                        let mut parts = Vec::new();
+                        if let Some(srtt) = data.smoothed_rtt {
+                            parts.push(format!("srtt: {:.3}", srtt));
+                        }
+                        if let Some(bif) = data.bytes_in_flight {
+                            parts.push(format!("in flight: {}", bif));
+                        }
+                        let display = if parts.len() > 2 {
+                            format!("{}, ...", parts[..2].join(", "))
+                        } else {
+                            parts.join(", ")
+                        };
+
+                        // Format full detail text
+                        let mut lines = Vec::new();
+                        if let Some(srtt) = data.smoothed_rtt {
+                            lines.push(format!("Smoothed RTT: {:.3}ms", srtt));
+                        }
+                        if let Some(latest_rtt) = data.latest_rtt {
+                            lines.push(format!("Latest RTT: {:.3}ms", latest_rtt));
+                        }
+                        if let Some(min_rtt) = data.min_rtt {
+                            lines.push(format!("Min RTT: {:.3}ms", min_rtt));
+                        }
+                        if let Some(cwnd) = data.congestion_window {
+                            lines.push(format!("Congestion Window: {} bytes", cwnd));
+                        }
+                        if let Some(bif) = data.bytes_in_flight {
+                            lines.push(format!("Bytes in Flight: {}", bif));
+                        }
+                        if let Some(pif) = data.packets_in_flight {
+                            lines.push(format!("Packets in Flight: {}", pif));
+                        }
+                        let detail = lines.join("\n");
+
+                        // Check if this is significant change (if in "significant only" mode)
+                        let current_state = LastMetricsState {
+                            smoothed_rtt: data.smoothed_rtt,
+                            bytes_in_flight: data.bytes_in_flight,
+                            congestion_window: data.congestion_window,
+                        };
+                        let is_significant = self.is_significant_metrics_change(
+                            self.last_metrics.as_ref(),
+                            &current_state,
+                        );
+
+                        // Store for next comparison
+                        self.last_metrics = Some(current_state);
+
+                        // Skip if not showing all and not significant
+                        if !self.show_all_metrics && !is_significant {
+                            None
+                        } else {
+                            Some(MetricsEvent {
+                                time: event.time as f64,
+                                event_type,
+                                display_text: display,
+                                detail_text: detail,
+                                color: event_type.color(),
+                                event_idx: idx,
+                                display_style: event_type.display_style(),
+                                smoothed_rtt: data.smoothed_rtt,
+                                bytes_in_flight: data.bytes_in_flight,
+                                congestion_window: data.congestion_window,
+                            })
+                        }
+                    } else {
+                        None
+                    }
+                }
+
+                EventData::CongestionStateUpdated(data) => {
+                    let event_type = MetricsEventType::CongestionStateUpdated;
+                    Some(MetricsEvent {
+                        time: event.time as f64,
+                        event_type,
+                        display_text: format!("{:?}", data.new),
+                        detail_text: format!(
+                            "Congestion state changed to {:?} at {:.3}ms",
+                            data.new, event.time
+                        ),
+                        color: event_type.color(),
+                        event_idx: idx,
+                        display_style: event_type.display_style(),
+                        smoothed_rtt: None,
+                        bytes_in_flight: None,
+                        congestion_window: None,
+                    })
+                }
+
+                EventData::ConnectionStateUpdated(data) => {
+                    let event_type = MetricsEventType::ConnectionStateUpdated;
+                    Some(MetricsEvent {
+                        time: event.time as f64,
+                        event_type,
+                        display_text: format!("{:?}", data.new),
+                        detail_text: format!("Connection state: {:?}", data.new),
+                        color: event_type.color(),
+                        event_idx: idx,
+                        display_style: event_type.display_style(),
+                        smoothed_rtt: None,
+                        bytes_in_flight: None,
+                        congestion_window: None,
+                    })
+                }
+
+                EventData::PacketLost(data) => {
+                    if let Some(header) = &data.header {
+                        if let Some(pn) = header.packet_number {
+                            let event_type = MetricsEventType::PacketLost;
+                            Some(MetricsEvent {
+                                time: event.time as f64,
+                                event_type,
+                                display_text: format!("lost PN {}", pn),
+                                detail_text: format!("Packet {} lost at {:.3}ms", pn, event.time),
+                                color: event_type.color(),
+                                event_idx: idx,
+                                display_style: event_type.display_style(),
+                                smoothed_rtt: None,
+                                bytes_in_flight: None,
+                                congestion_window: None,
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+
+                _ => None,
+            };
+
+            if let Some(event) = metrics_event {
+                self.metrics_events.push(event);
+            }
+        }
+
+        let num_boxes = self
+            .metrics_events
+            .iter()
+            .filter(|e| e.display_style == MetricsDisplayStyle::Box)
+            .count();
+        let num_markers = self
+            .metrics_events
+            .iter()
+            .filter(|e| e.display_style == MetricsDisplayStyle::Marker)
+            .count();
+
+        tracing::info!(
+            "Extracted {} metrics events from {} total events ({} boxes, {} markers)",
+            self.metrics_events.len(),
+            qlog.events.len(),
+            num_boxes,
+            num_markers
+        );
+    }
+
+    fn is_significant_metrics_change(
+        &self,
+        prev: Option<&LastMetricsState>,
+        curr: &LastMetricsState,
+    ) -> bool {
+        // If no previous metrics, it's significant (first occurrence)
+        let Some(prev) = prev else {
+            return true;
+        };
+
+        // Check if bytes_in_flight changed significantly
+        if let (Some(prev_bif), Some(curr_bif)) = (prev.bytes_in_flight, curr.bytes_in_flight) {
+            if (curr_bif as i64 - prev_bif as i64).abs() > 1000 {
+                return true;
+            }
+        }
+
+        // Check if cwnd changed by >20%
+        if let (Some(prev_cwnd), Some(curr_cwnd)) = (prev.congestion_window, curr.congestion_window)
+        {
+            if prev_cwnd > 0 {
+                let change_pct = ((curr_cwnd as f64 - prev_cwnd as f64) / prev_cwnd as f64).abs();
+                if change_pct > 0.2 {
+                    return true;
+                }
+            }
+        }
+
+        // Check if RTT changed by >10%
+        if let (Some(prev_rtt), Some(curr_rtt)) = (prev.smoothed_rtt, curr.smoothed_rtt) {
+            if prev_rtt > 0.0 {
+                let change_pct = ((curr_rtt - prev_rtt) / prev_rtt).abs();
+                if change_pct > 0.1 {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn draw_metrics_events(
+        &mut self,
+        painter: &Painter,
+        ui: &mut egui::Ui,
+        layout: &DiagramLayout,
+        time_to_y: impl Fn(f64) -> f32,
+        viewport: &Rect,
+    ) {
+        if !self.show_metrics_events {
+            tracing::debug!("Metrics events hidden by toggle");
+            return;
+        }
+
+        if self.metrics_events.is_empty() {
+            tracing::debug!("No metrics events to display");
+            return;
+        }
+
+        tracing::debug!("Drawing {} metrics events", self.metrics_events.len());
+
+        match self.metrics_visualization_mode {
+            MetricsVisualizationMode::Events => {
+                // Separate events by display style - clone to avoid borrow issues
+                let boxes: Vec<MetricsEvent> = self
+                    .metrics_events
+                    .iter()
+                    .filter(|e| e.display_style == MetricsDisplayStyle::Box)
+                    .cloned()
+                    .collect();
+                let markers: Vec<MetricsEvent> = self
+                    .metrics_events
+                    .iter()
+                    .filter(|e| e.display_style == MetricsDisplayStyle::Marker)
+                    .cloned()
+                    .collect();
+
+                // Draw markers first (behind boxes)
+                Self::draw_metrics_markers_static(&markers, painter, ui, layout, &time_to_y);
+
+                // Draw boxes on top
+                self.draw_metrics_boxes_mut(&boxes, painter, ui, layout, &time_to_y);
+            }
+            MetricsVisualizationMode::Graphs => {
+                self.draw_metrics_graphs(painter, ui, layout, &time_to_y, viewport);
+            }
+        }
+    }
+
+    fn draw_metrics_boxes_mut(
+        &mut self,
+        events: &[MetricsEvent],
+        painter: &Painter,
+        ui: &mut egui::Ui,
+        layout: &DiagramLayout,
+        time_to_y: &impl Fn(f64) -> f32,
+    ) {
+        const BOX_WIDTH: f32 = 140.0;
+        const BOX_PADDING: f32 = 6.0;
+        const MARGIN_FROM_TIMELINE: f32 = 50.0;
+
+        for event in events {
+            let y = time_to_y(event.time);
+
+            // Draw colored box
+            let text_galley = painter.layout_no_wrap(
+                event.display_text.clone(),
+                egui::FontId::proportional(10.0),
+                Color32::WHITE,
+            );
+
+            let box_height = text_galley.size().y + BOX_PADDING * 2.0;
+
+            // Position boxes to the left of the left timeline
+            let box_x = layout.left_x - BOX_WIDTH - MARGIN_FROM_TIMELINE;
+
+            let rect = Rect::from_min_size(
+                Pos2::new(box_x, y - box_height / 2.0),
+                Vec2::new(BOX_WIDTH, box_height),
+            );
+
+            painter.rect_filled(rect, 4.0, event.color);
+            painter.rect_stroke(
+                rect,
+                4.0,
+                Stroke::new(1.0, Color32::WHITE.linear_multiply(0.5)),
+                StrokeKind::Inside,
+            );
+
+            // Draw text
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                &event.display_text,
+                egui::FontId::proportional(10.0),
+                Color32::WHITE,
+            );
+
+            // Add click interaction
+            let response = ui.interact(
+                rect,
+                ui.id().with(("metrics_box", event.event_idx)),
+                Sense::click(),
+            );
+            if response.clicked() {
+                self.selected_metrics_event = Some(event.event_idx);
+            }
+        }
+
+        // Draw popup if an event is selected
+        if let Some(selected_idx) = self.selected_metrics_event {
+            if let Some(event) = self
+                .metrics_events
+                .iter()
+                .find(|e| e.event_idx == selected_idx)
+            {
+                egui::Window::new(event.event_type.name())
+                    .fixed_pos(ui.cursor().min)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(&event.detail_text);
+                        if ui.button("Close").clicked() {
+                            self.selected_metrics_event = None;
+                        }
+                    });
+            }
+        }
+    }
+
+    fn draw_metrics_markers_static(
+        events: &[MetricsEvent],
+        painter: &Painter,
+        ui: &mut egui::Ui,
+        layout: &DiagramLayout,
+        time_to_y: &impl Fn(f64) -> f32,
+    ) {
+        const MARKER_SIZE: f32 = 6.0;
+        const MARKER_OFFSET: f32 = 12.0;
+
+        for event in events {
+            let y = time_to_y(event.time);
+            let x = layout.left_x - MARKER_OFFSET;
+
+            let center = Pos2::new(x, y);
+
+            // Draw diamond shape for metrics markers
+            let points = vec![
+                Pos2::new(x, y - MARKER_SIZE), // Top
+                Pos2::new(x + MARKER_SIZE, y), // Right
+                Pos2::new(x, y + MARKER_SIZE), // Bottom
+                Pos2::new(x - MARKER_SIZE, y), // Left
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                event.color,
+                Stroke::NONE,
+            ));
+
+            // Add hover interaction for tooltip
+            let rect = Rect::from_center_size(center, Vec2::splat(MARKER_SIZE * 2.0));
+            let response = ui.interact(
+                rect,
+                ui.id().with(("metrics_marker", event.event_idx)),
+                Sense::hover(),
+            );
+
+            if response.hovered() {
+                // Use Area for instant tooltip (no delay)
+                egui::Area::new(ui.id().with(("marker_tooltip", event.event_idx)))
+                    .fixed_pos(
+                        ui.ctx().pointer_latest_pos().unwrap_or(center) + Vec2::new(10.0, 10.0),
+                    )
+                    .order(egui::Order::Tooltip)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(&event.display_text);
+                            ui.label(format!("Time: {:.3}ms", event.time));
+                        });
+                    });
+            }
+        }
+    }
+
+    fn draw_metrics_graphs(
+        &self,
+        painter: &Painter,
+        ui: &mut egui::Ui,
+        layout: &DiagramLayout,
+        time_to_y: &impl Fn(f64) -> f32,
+        viewport: &Rect,
+    ) {
+        const STRIP_WIDTH: f32 = 60.0;
+        const STRIP_SPACING: f32 = 10.0;
+        const MARGIN_FROM_TIMELINE: f32 = 50.0;
+
+        // Extract metrics data points from MetricsUpdated events
+        let mut cwnd_points: Vec<(f64, u64)> = Vec::new();
+        let mut bytes_in_flight_points: Vec<(f64, u64)> = Vec::new();
+        let mut rtt_points: Vec<(f64, f32)> = Vec::new();
+
+        for event in &self.metrics_events {
+            if event.event_type == MetricsEventType::MetricsUpdated {
+                if let Some(cwnd) = event.congestion_window {
+                    cwnd_points.push((event.time, cwnd));
+                }
+                if let Some(bif) = event.bytes_in_flight {
+                    bytes_in_flight_points.push((event.time, bif));
+                }
+                if let Some(rtt) = event.smoothed_rtt {
+                    rtt_points.push((event.time, rtt));
+                }
+            }
+        }
+
+        // Calculate x positions for the three strips
+        let base_x = layout.left_x - MARGIN_FROM_TIMELINE;
+        let cwnd_x = base_x - STRIP_WIDTH * 3.0 - STRIP_SPACING * 2.0;
+        let bif_x = base_x - STRIP_WIDTH * 2.0 - STRIP_SPACING;
+        let rtt_x = base_x - STRIP_WIDTH;
+
+        // Draw each graph strip
+        Self::draw_metric_strip(
+            painter,
+            "cwnd",
+            &cwnd_points,
+            cwnd_x,
+            STRIP_WIDTH,
+            layout,
+            time_to_y,
+            Color32::from_rgb(100, 150, 255),
+            ui,
+            viewport,
+        );
+
+        Self::draw_metric_strip(
+            painter,
+            "in flight",
+            &bytes_in_flight_points,
+            bif_x,
+            STRIP_WIDTH,
+            layout,
+            time_to_y,
+            Color32::from_rgb(255, 150, 100),
+            ui,
+            viewport,
+        );
+
+        Self::draw_metric_strip_f32(
+            painter,
+            "RTT",
+            &rtt_points,
+            rtt_x,
+            STRIP_WIDTH,
+            layout,
+            time_to_y,
+            Color32::from_rgb(150, 255, 100),
+            ui,
+            viewport,
+        );
+    }
+
+    fn format_bytes(bytes: u64) -> String {
+        if bytes < 1024 {
+            format!("{}B", bytes)
+        } else if bytes < 1024 * 1024 {
+            format!("{:.1}KiB", bytes as f64 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 {
+            format!("{:.1}MiB", bytes as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{:.1}GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_metric_strip(
+        painter: &Painter,
+        label: &str,
+        points: &[(f64, u64)],
+        x: f32,
+        width: f32,
+        layout: &DiagramLayout,
+        time_to_y: &impl Fn(f64) -> f32,
+        color: Color32,
+        ui: &mut egui::Ui,
+        viewport: &Rect,
+    ) {
+        if points.is_empty() {
+            return;
+        }
+
+        // Draw background rectangle
+        let rect = egui::Rect::from_min_max(
+            egui::Pos2::new(x, layout.top_y),
+            egui::Pos2::new(x + width, layout.rect.max.y),
+        );
+        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 30));
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, Color32::DARK_GRAY),
+            egui::epaint::StrokeKind::Inside,
+        );
+
+        // Draw label at the top
+        painter.text(
+            egui::Pos2::new(x + width / 2.0, layout.top_y + 5.0),
+            egui::Align2::CENTER_TOP,
+            label,
+            egui::FontId::proportional(9.0),
+            Color32::LIGHT_GRAY,
+        );
+
+        // Find min/max values for normalization
+        let max_value = points.iter().map(|(_, v)| *v).max().unwrap_or(1);
+        let min_value = points.iter().map(|(_, v)| *v).min().unwrap_or(0);
+        let value_range = if max_value > min_value {
+            max_value - min_value
+        } else {
+            1
+        };
+
+        // Draw horizontal grid lines
+        const NUM_GRID_LINES: usize = 4;
+        for i in 0..=NUM_GRID_LINES {
+            let value = min_value + (value_range * i as u64 / NUM_GRID_LINES as u64);
+            let normalized = (value - min_value) as f32 / value_range as f32;
+            let grid_x = x + 5.0 + normalized * (width - 10.0);
+            painter.line_segment(
+                [
+                    egui::Pos2::new(grid_x, layout.top_y + 20.0),
+                    egui::Pos2::new(grid_x, layout.rect.max.y - 30.0),
+                ],
+                egui::Stroke::new(0.5, Color32::from_rgba_unmultiplied(100, 100, 100, 50)),
+            );
+        }
+
+        // Draw line graph and collect points for hover interaction
+        let mut prev_point: Option<egui::Pos2> = None;
+        let mut graph_points = Vec::new();
+        for (time, value) in points {
+            let y = time_to_y(*time);
+            // Normalize value to strip width (with padding)
+            let normalized = (*value - min_value) as f32 / value_range as f32;
+            let point_x = x + 5.0 + normalized * (width - 10.0);
+            let point = egui::Pos2::new(point_x, y);
+
+            // Draw line connecting to previous point
+            if let Some(prev) = prev_point {
+                painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+            }
+
+            // Draw bigger circle at data point
+            painter.circle_filled(point, 3.5, color);
+
+            graph_points.push((point, *value));
+            prev_point = Some(point);
+        }
+
+        // Add hover interaction for data points
+        for (point, value) in graph_points {
+            let hover_rect = Rect::from_center_size(point, Vec2::splat(10.0));
+            let response = ui.interact(
+                hover_rect,
+                ui.id()
+                    .with(("metric_point", point.x as i32, point.y as i32)),
+                Sense::hover(),
+            );
+
+            if response.hovered() {
+                // Use Area for instant tooltip (no delay)
+                egui::Area::new(ui.id().with(("tooltip", point.x as i32, point.y as i32)))
+                    .fixed_pos(
+                        ui.ctx().pointer_latest_pos().unwrap_or(point) + Vec2::new(10.0, 10.0),
+                    )
+                    .order(egui::Order::Tooltip)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(format!("{}: {}", label, Self::format_bytes(value)));
+                        });
+                    });
+            }
+        }
+
+        // Draw max label stuck to bottom of viewport (min assumed to be 0)
+        let label_y = layout.rect.top() + viewport.max.y - 12.0;
+        painter.text(
+            egui::Pos2::new(x + width - 8.0, label_y),
+            egui::Align2::RIGHT_BOTTOM,
+            Self::format_bytes(max_value),
+            egui::FontId::proportional(10.0),
+            Color32::LIGHT_GRAY,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_metric_strip_f32(
+        painter: &Painter,
+        label: &str,
+        points: &[(f64, f32)],
+        x: f32,
+        width: f32,
+        layout: &DiagramLayout,
+        time_to_y: &impl Fn(f64) -> f32,
+        color: Color32,
+        ui: &mut egui::Ui,
+        viewport: &Rect,
+    ) {
+        if points.is_empty() {
+            return;
+        }
+
+        // Draw background rectangle
+        let rect = egui::Rect::from_min_max(
+            egui::Pos2::new(x, layout.top_y),
+            egui::Pos2::new(x + width, layout.rect.max.y),
+        );
+        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 30));
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, Color32::DARK_GRAY),
+            egui::epaint::StrokeKind::Inside,
+        );
+
+        // Draw label at the top
+        painter.text(
+            egui::Pos2::new(x + width / 2.0, layout.top_y + 5.0),
+            egui::Align2::CENTER_TOP,
+            label,
+            egui::FontId::proportional(9.0),
+            Color32::LIGHT_GRAY,
+        );
+
+        // Find min/max values for normalization
+        let max_value = points
+            .iter()
+            .map(|(_, v)| *v)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(1.0);
+        let min_value = points
+            .iter()
+            .map(|(_, v)| *v)
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(0.0);
+        let value_range = if max_value > min_value {
+            max_value - min_value
+        } else {
+            1.0
+        };
+
+        // Draw horizontal grid lines
+        const NUM_GRID_LINES: usize = 4;
+        for i in 0..=NUM_GRID_LINES {
+            let value = min_value + (value_range * i as f32 / NUM_GRID_LINES as f32);
+            let normalized = (value - min_value) / value_range;
+            let grid_x = x + 5.0 + normalized * (width - 10.0);
+            painter.line_segment(
+                [
+                    egui::Pos2::new(grid_x, layout.top_y + 20.0),
+                    egui::Pos2::new(grid_x, layout.rect.max.y - 30.0),
+                ],
+                egui::Stroke::new(0.5, Color32::from_rgba_unmultiplied(100, 100, 100, 50)),
+            );
+        }
+
+        // Draw line graph and collect points for hover interaction
+        let mut prev_point: Option<egui::Pos2> = None;
+        let mut graph_points = Vec::new();
+        for (time, value) in points {
+            let y = time_to_y(*time);
+            // Normalize value to strip width (with padding)
+            let normalized = (*value - min_value) / value_range;
+            let point_x = x + 5.0 + normalized * (width - 10.0);
+            let point = egui::Pos2::new(point_x, y);
+
+            // Draw line connecting to previous point
+            if let Some(prev) = prev_point {
+                painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+            }
+
+            // Draw bigger circle at data point
+            painter.circle_filled(point, 3.5, color);
+
+            graph_points.push((point, *value));
+            prev_point = Some(point);
+        }
+
+        // Add hover interaction for data points
+        for (point, value) in graph_points {
+            let hover_rect = Rect::from_center_size(point, Vec2::splat(10.0));
+            let response = ui.interact(
+                hover_rect,
+                ui.id()
+                    .with(("metric_point_f32", point.x as i32, point.y as i32)),
+                Sense::hover(),
+            );
+
+            if response.hovered() {
+                // Use Area for instant tooltip (no delay)
+                egui::Area::new(
+                    ui.id()
+                        .with(("tooltip_f32", point.x as i32, point.y as i32)),
+                )
+                .fixed_pos(ui.ctx().pointer_latest_pos().unwrap_or(point) + Vec2::new(10.0, 10.0))
+                .order(egui::Order::Tooltip)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(format!("{}: {:.2}ms", label, value));
+                    });
+                });
+            }
+        }
+
+        // Draw max label stuck to bottom of viewport (min assumed to be 0)
+        let label_y = layout.rect.top() + viewport.max.y - 12.0;
+        painter.text(
+            egui::Pos2::new(x + width - 8.0, label_y),
+            egui::Align2::RIGHT_BOTTOM,
+            format!("{:.1}ms", max_value),
+            egui::FontId::proportional(10.0),
+            Color32::LIGHT_GRAY,
+        );
     }
 }
 

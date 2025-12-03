@@ -3,7 +3,7 @@ use crate::multiplexing_diagram::MultiplexingDiagram;
 use crate::packet_correlation::PacketCorrelation;
 use crate::packetization_diagram::PacketizationDiagram;
 use crate::qlog_data::QlogData;
-use crate::sequence_diagram::SequenceDiagram;
+use crate::sequence_diagram::{MetricsVisualizationMode, SequenceDiagram};
 use crate::stats_view::StatsView;
 use crate::utils::{self, FrameType};
 use egui::text::LayoutJob;
@@ -182,6 +182,64 @@ impl QlogViewerApp {
                     }
                     ui.separator();
                     ui.checkbox(&mut self.show_event_detail, "Show Event Detail Panel");
+
+                    ui.separator();
+                    ui.label("Sequence Diagram Options:");
+
+                    // Main toggle to show/hide all metrics events
+                    ui.checkbox(
+                        &mut self.sequence_diagram.show_metrics_events,
+                        "Show Metrics Events",
+                    );
+
+                    // Secondary toggle for filtering (only enabled if metrics are shown)
+                    ui.add_enabled_ui(self.sequence_diagram.show_metrics_events, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Visualization:");
+                            if ui
+                                .radio(
+                                    self.sequence_diagram.metrics_visualization_mode
+                                        == MetricsVisualizationMode::Events,
+                                    "Events",
+                                )
+                                .clicked()
+                            {
+                                self.sequence_diagram.metrics_visualization_mode =
+                                    MetricsVisualizationMode::Events;
+                            }
+                            if ui
+                                .radio(
+                                    self.sequence_diagram.metrics_visualization_mode
+                                        == MetricsVisualizationMode::Graphs,
+                                    "Graphs",
+                                )
+                                .clicked()
+                            {
+                                self.sequence_diagram.metrics_visualization_mode =
+                                    MetricsVisualizationMode::Graphs;
+                            }
+                        });
+
+                        // Only show the "Show All Metrics Updates" toggle when in Events mode
+                        if self.sequence_diagram.metrics_visualization_mode
+                            == MetricsVisualizationMode::Events
+                        {
+                            if ui
+                                .checkbox(
+                                    &mut self.sequence_diagram.show_all_metrics,
+                                    "Show All Metrics Updates",
+                                )
+                                .changed()
+                            {
+                                // Re-extract events with new filter by invalidating cache
+                                self.sequence_diagram.invalidate_cache();
+                            }
+
+                            if !self.sequence_diagram.show_all_metrics {
+                                ui.label("(Showing significant changes only)");
+                            }
+                        }
+                    });
                 });
 
                 ui.separator();
