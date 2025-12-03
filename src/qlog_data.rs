@@ -1,10 +1,12 @@
+use std::{fs, path::Path};
+
 use anyhow::{Context, Result};
+use convert_case::{Case, Casing};
 use qlog::{
-    events::{Event, EventData},
     Trace,
+    events::{Event, EventData, EventType},
 };
 use serde::Deserialize;
-use std::{fs, path::Path};
 use tracing::{error, info, warn};
 
 #[derive(Deserialize)]
@@ -198,33 +200,14 @@ impl QlogData {
     }
 
     pub fn get_event_name(&self, event: &Event) -> String {
-        match &event.data {
-            EventData::PacketSent(_) => "transport:packet_sent",
-            EventData::PacketReceived(_) => "transport:packet_received",
-            EventData::PacketDropped(_) => "transport:packet_dropped",
-            EventData::PacketBuffered(_) => "transport:packet_buffered",
-            EventData::PacketLost(_) => "recovery:packet_lost",
-            EventData::PacketsAcked(_) => "recovery:packets_acked",
-            EventData::FramesProcessed(_) => "transport:frames_processed",
-            EventData::MetricsUpdated(_) => "recovery:metrics_updated",
-            EventData::CongestionStateUpdated(_) => "recovery:congestion_state_updated",
-            EventData::TimerUpdated(_) => "recovery:loss_timer_updated",
-            EventData::UdpDatagramsSent(_) => "transport:datagrams_sent",
-            EventData::UdpDatagramsReceived(_) => "transport:datagrams_received",
-            EventData::UdpDatagramDropped(_) => "transport:datagram_dropped",
-            EventData::StreamStateUpdated(_) => "transport:stream_state_updated",
-            EventData::H3ParametersSet(_) => "http:parameters_set",
-            EventData::ConnectionStarted(_) => "connectivity:connection_started",
-            EventData::ConnectionClosed(_) => "connectivity:connection_closed",
-            EventData::ConnectionStateUpdated(_) => "connectivity:connection_state_updated",
-            EventData::VersionInformation(_) => "transport:version_information",
-            EventData::AlpnInformation(_) => {
-                "transport:alpn_inf
-ormation"
-            }
-            _ => "unknown",
+        let ty: EventType = (&event.data).into();
+
+        match ty {
+            EventType::QuicEventType(t) => format!("quic:{}", to_lower(t)),
+            EventType::Http3EventType(t) => format!("h3:{}", to_lower(t)),
+            EventType::LogLevelEventType(t) => format!("loglevel:{}", to_lower(t)),
+            EventType::None => "none".to_string(),
         }
-        .to_string()
     }
 
     pub fn format_time(&self, event: &Event) -> String {
@@ -235,16 +218,18 @@ ormation"
         match &event.data {
             EventData::PacketSent(d) => {
                 format!(
-                    "PN: {:?}, Type: {:?}",
+                    "Space {:?}, PN: {}, Path: {}",
+                    d.header.packet_type,
                     d.header.packet_number.unwrap_or(0),
-                    d.header.packet_type.clone()
+                    d.header.path_id.unwrap_or_default(),
                 )
             }
             EventData::PacketReceived(d) => {
                 format!(
-                    "PN: {:?}, Type: {:?}",
+                    "Space {:?}, PN: {}, Path: {}",
+                    d.header.packet_type,
                     d.header.packet_number.unwrap_or(0),
-                    d.header.packet_type.clone()
+                    d.header.path_id.unwrap_or_default(),
                 )
             }
             EventData::StreamStateUpdated(d) => {
@@ -253,9 +238,10 @@ ormation"
             EventData::PacketLost(d) => {
                 if let Some(header) = &d.header {
                     format!(
-                        "PN: {:?}, Type: {:?}",
+                        "Space {:?}, PN: {}, Path: {}",
+                        header.packet_type,
                         header.packet_number.unwrap_or(0),
-                        header.packet_type.clone()
+                        header.path_id.unwrap_or_default(),
                     )
                 } else {
                     "Lost packet".to_string()
@@ -280,6 +266,11 @@ ormation"
             _ => String::new(),
         }
     }
+}
+
+fn to_lower(val: impl std::fmt::Debug) -> String {
+    let t = format!("{val:?}");
+    t.to_case(Case::Snake)
 }
 
 #[cfg(test)]

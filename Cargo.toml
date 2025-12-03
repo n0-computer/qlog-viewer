@@ -43,6 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CLI argument parsing
 clap = { version = "4.5", features = ["derive"] }
+convert_case = "0.10.0"
 
 # CI release profile with heavy optimizations for distribution builds
 [profile.ci-release]
