@@ -83,12 +83,12 @@ impl QlogData {
     /// - transport:* -> quic:*
     /// - recovery:* -> quic:recovery_*
     fn normalize_event_namespace(line: &str) -> String {
-        let normalized = line
+        
+
+        line
             .replace("\"name\":\"connectivity:", "\"name\":\"quic:")
             .replace("\"name\":\"transport:", "\"name\":\"quic:")
-            .replace("\"name\":\"recovery:", "\"name\":\"quic:recovery_");
-
-        normalized
+            .replace("\"name\":\"recovery:", "\"name\":\"quic:recovery_")
     }
 
     pub fn from_ndjson(ndjson: &str) -> Result<Self> {

@@ -57,8 +57,6 @@ pub struct SentPacketInfo {
 
 #[derive(Debug, Clone)]
 pub struct ReorderEvent {
-    pub earlier_pn: u64,
-    pub later_pn: u64,
     pub earlier_time: f32,
 }
 
@@ -232,8 +230,6 @@ impl PacketCorrelation {
 
                     if pn < *max_pn && self.reorderings.len() < MAX_REORDERINGS {
                         self.reorderings.push(ReorderEvent {
-                            earlier_pn: pn,
-                            later_pn: *max_pn,
                             earlier_time: event.time,
                         });
                     }
@@ -299,32 +295,8 @@ impl PacketCorrelation {
         }
     }
 
-    pub fn is_packet_lost(&self, path_id: u64, packet_type: &str, packet_number: u64) -> bool {
-        self.lost_packets
-            .contains_key(&(path_id, packet_type.to_string(), packet_number))
-    }
-
-    pub fn get_rtt(&self, path_id: u64, packet_type: &str, packet_number: u64) -> Option<f32> {
-        self.sent_packets
-            .get(&(path_id, packet_type.to_string(), packet_number))
-            .and_then(|p| p.rtt)
-    }
-
     pub fn loss_count(&self) -> usize {
         self.lost_packets.len()
-    }
-
-    pub fn visible_reorderings(
-        &self,
-        start_time: f32,
-        end_time: f32,
-        max_count: usize,
-    ) -> Vec<&ReorderEvent> {
-        self.reorderings
-            .iter()
-            .filter(|r| r.earlier_time >= start_time && r.earlier_time <= end_time)
-            .take(max_count)
-            .collect()
     }
 
     pub fn visible_time_gaps(&self, start_time: f32, end_time: f32) -> Vec<&TimeGap> {

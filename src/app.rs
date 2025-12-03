@@ -11,9 +11,9 @@ use egui::{
     CentralPanel, CollapsingHeader, Context, FontFamily, FontId, SidePanel, TextFormat,
     TopBottomPanel,
 };
-use qlog::events::RawInfo;
 use qlog::events::quic::PacketHeader;
-use qlog::events::{Event, EventData, quic::QuicFrame};
+use qlog::events::RawInfo;
+use qlog::events::{quic::QuicFrame, Event, EventData};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use tracing::{error, info};
@@ -549,66 +549,7 @@ impl QlogViewerApp {
                             return;
                         };
 
-                        ui.heading(format!("Event #{} - {}", idx, data.get_event_name(event)));
-                        render_header(ui, &event.data);
-
-                        ui.separator();
-
-                        ui.label(format!("Time: {}", data.format_time(event)));
-
-                        if !event.ex_data.is_empty() {
-                            for (key, value) in &event.ex_data {
-                                ui.label(format!("[EX] {key}: {value}"));
-                            }
-                        }
-
-                        if event.data.contains_quic_frames().is_some() {
-                            ui.add_space(5.);
-                            ui.separator();
-                            ui.add_space(5.);
-                            ui.heading("Frames");
-                            match event.data {
-                                EventData::PacketSent(ref pkt) => {
-                                    if let Some(ref frames) = pkt.frames {
-                                        for (i, frame) in frames.iter().enumerate() {
-                                            render_frame_with_prefix(ui, "single", idx, i, frame);
-                                        }
-                                    }
-                                }
-                                EventData::PacketReceived(ref pkt) => {
-                                    if let Some(ref frames) = pkt.frames {
-                                        for (i, frame) in frames.iter().enumerate() {
-                                            render_frame_with_prefix(ui, "single", idx, i, frame);
-                                        }
-                                    }
-                                }
-                                EventData::PacketLost(ref pkt) => {
-                                    if let Some(ref frames) = pkt.frames {
-                                        for (i, frame) in frames.iter().enumerate() {
-                                            render_frame_with_prefix(ui, "single", idx, i, frame);
-                                        }
-                                    }
-                                }
-                                EventData::MarkedForRetransmit(ref ev) => {
-                                    for (i, frame) in ev.frames.iter().enumerate() {
-                                        render_frame_with_prefix(ui, "single", idx, i, frame);
-                                    }
-                                }
-                                EventData::FramesProcessed(ref ev) => {
-                                    for (i, frame) in ev.frames.iter().enumerate() {
-                                        render_frame_with_prefix(ui, "single", idx, i, frame);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        ui.collapsing("Raw JSON", |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                let s = serde_json::to_string_pretty(&event).unwrap();
-                                ui.label(s);
-                            });
-                        });
+                        self.render_single_event(ui, idx, event, data, "single");
                     }
                 });
             });
@@ -623,6 +564,8 @@ impl QlogViewerApp {
         id_prefix: &str,
     ) {
         ui.heading(format!("Event #{} - {}", idx, data.get_event_name(event)));
+        render_header(ui, &event.data);
+
         ui.separator();
 
         ui.label(format!("Time: {}", data.format_time(event)));
@@ -673,6 +616,13 @@ impl QlogViewerApp {
                 _ => {}
             }
         }
+
+        CollapsingHeader::new("Raw JSON")
+            .id_salt(format!("{}-raw-json-{}", id_prefix, idx))
+            .show(ui, |ui| {
+                let s = serde_json::to_string_pretty(&event).unwrap();
+                ui.label(s);
+            });
     }
 
     fn render_dual_event_detail(&self, ui: &mut egui::Ui) {
@@ -1352,7 +1302,7 @@ fn render_frame_with_prefix(
                     raw,
                 } => {
                     ui.label("Connection Id");
-                    ui.label(format!("{connection_id}"));
+                    ui.label(connection_id.to_string());
                     ui.end_row();
 
                     ui.label("Path Id");
@@ -1374,7 +1324,7 @@ fn render_frame_with_prefix(
                     }
                     if let Some(token) = stateless_reset_token {
                         ui.label("Stateless Reset Token");
-                        ui.label(format!("{token}"));
+                        ui.label(token.to_string());
                         ui.end_row();
                     }
 
@@ -1413,28 +1363,28 @@ fn render_frame_with_prefix(
                     }
                 }
                 AckFrequency {
-                        sequence_number,
-                        ack_eliciting_threshold,
-                        requested_max_ack_delay,
-                        reordering_threshold,
-                        raw,
-                    } => {
-                        ui.label("Seq Number");
-                        ui.label(format!("{sequence_number}"));
-                        ui.end_row();
-                        ui.label("Ack Eliciting Threshold");
-                        ui.label(format!("{ack_eliciting_threshold}"));
-                        ui.end_row();
-                        ui.label("Requested Max Ack Delay");
-                        ui.label(format!("{requested_max_ack_delay}"));
-                        ui.end_row();
-                        ui.label("Reordering Threshold");
-                        ui.label(format!("{reordering_threshold}"));
-                        ui.end_row();
+                    sequence_number,
+                    ack_eliciting_threshold,
+                    requested_max_ack_delay,
+                    reordering_threshold,
+                    raw,
+                } => {
+                    ui.label("Seq Number");
+                    ui.label(format!("{sequence_number}"));
+                    ui.end_row();
+                    ui.label("Ack Eliciting Threshold");
+                    ui.label(format!("{ack_eliciting_threshold}"));
+                    ui.end_row();
+                    ui.label("Requested Max Ack Delay");
+                    ui.label(format!("{requested_max_ack_delay}"));
+                    ui.end_row();
+                    ui.label("Reordering Threshold");
+                    ui.label(format!("{reordering_threshold}"));
+                    ui.end_row();
 
-                        if let Some(raw) = raw {
-                            render_raw_info(ui, raw);
-                        }
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
                 }
                 ImmediateAck { raw } => {
                     if let Some(raw) = raw {
