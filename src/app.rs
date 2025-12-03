@@ -174,6 +174,34 @@ impl QlogViewerApp {
                     }
                     ui.separator();
                     ui.checkbox(&mut self.show_event_detail, "Show Event Detail Panel");
+
+                    // Multipath visualization mode toggle
+                    if self.view_mode == ViewMode::SequenceDiagram {
+                        ui.separator();
+                        ui.label("Multipath Visualization:");
+                        if ui
+                            .radio(
+                                self.sequence_diagram.visualization_mode
+                                    == crate::sequence_diagram::VisualizationMode::ColorCoded,
+                                "Color-Coded",
+                            )
+                            .clicked()
+                        {
+                            self.sequence_diagram.visualization_mode =
+                                crate::sequence_diagram::VisualizationMode::ColorCoded;
+                        }
+                        if ui
+                            .radio(
+                                self.sequence_diagram.visualization_mode
+                                    == crate::sequence_diagram::VisualizationMode::VerticalLanes,
+                                "Vertical Lanes",
+                            )
+                            .clicked()
+                        {
+                            self.sequence_diagram.visualization_mode =
+                                crate::sequence_diagram::VisualizationMode::VerticalLanes;
+                        }
+                    }
                 });
 
                 ui.separator();

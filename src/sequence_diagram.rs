@@ -17,6 +17,58 @@ const SENT_COLOR: Color32 = Color32::from_rgb(0, 150, 255);
 const RECEIVED_COLOR: Color32 = Color32::from_rgb(220, 80, 80);
 const LOSS_COLOR: Color32 = Color32::RED;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualizationMode {
+    ColorCoded,
+    VerticalLanes,
+}
+
+// Path color palette for multipath visualization
+const PATH_COLORS: &[(u8, u8, u8)] = &[
+    (41, 128, 185),   // Blue (path 0)
+    (39, 174, 96),    // Green (path 1)
+    (230, 126, 34),   // Orange (path 2)
+    (142, 68, 173),   // Purple (path 3)
+    (192, 57, 43),    // Red (path 4)
+    (22, 160, 133),   // Teal (path 5)
+];
+
+fn path_color(path_id: u64) -> Color32 {
+    if let Some(&(r, g, b)) = PATH_COLORS.get(path_id as usize) {
+        Color32::from_rgb(r, g, b)
+    } else {
+        // Golden ratio hashing for path_id > 5
+        let hue = ((path_id as f32 * 137.508) % 360.0) / 360.0;
+        hsv_to_rgb(hue, 0.7, 0.8)
+    }
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color32 {
+    let c = v * s;
+    let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+
+    let (r, g, b) = if h < 1.0 / 6.0 {
+        (c, x, 0.0)
+    } else if h < 2.0 / 6.0 {
+        (x, c, 0.0)
+    } else if h < 3.0 / 6.0 {
+        (0.0, c, x)
+    } else if h < 4.0 / 6.0 {
+        (0.0, x, c)
+    } else if h < 5.0 / 6.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+
+    Color32::from_rgb(
+        ((r + m) * 255.0) as u8,
+        ((g + m) * 255.0) as u8,
+        ((b + m) * 255.0) as u8,
+    )
+}
+
 pub struct SequenceDiagram {
     selected_packet_idx: Option<usize>,
     cached_packets: Vec<PacketInfo>,
@@ -31,6 +83,7 @@ pub struct SequenceDiagram {
     dual_time_scale: f32,
     files_swapped: bool,
     compress_gaps: bool,
+    pub visualization_mode: VisualizationMode,
 }
 
 const GAP_THRESHOLD_MS: f64 = 5.0;
@@ -49,6 +102,7 @@ struct DualArrow {
     from_left: bool,
     packet_type_short: String,
     packet_number: u64,
+    path_id: Option<u64>,
     frames: Vec<FrameType>,
     is_lost: bool,
     event_idx: usize,
@@ -59,6 +113,14 @@ struct DiagramLayout {
     right_x: f32,
     top_y: f32,
     rect: Rect,
+}
+
+struct PathLaneLayout {
+    left_lanes: HashMap<u64, f32>,   // path_id -> x position
+    right_lanes: HashMap<u64, f32>,  // path_id -> x position
+    #[allow(dead_code)]
+    center_x: f32,
+    use_lanes: bool,  // false if too many paths (>4), falls back to color mode
 }
 
 struct TimeContext<'a> {
@@ -84,6 +146,7 @@ impl SequenceDiagram {
             dual_time_scale: 30.0,
             files_swapped: false,
             compress_gaps: true,
+            visualization_mode: VisualizationMode::ColorCoded,
         }
     }
 
@@ -293,6 +356,63 @@ impl SequenceDiagram {
         ui.separator();
     }
 
+    fn calculate_lane_layout(
+        &self,
+        rect: &Rect,
+        left_path_ids: &[u64],
+        right_path_ids: &[u64],
+    ) -> PathLaneLayout {
+        let max_paths = left_path_ids.len().max(right_path_ids.len());
+
+        // Fallback to color mode if >4 paths per side
+        if max_paths > 4 {
+            return PathLaneLayout {
+                left_lanes: HashMap::new(),
+                right_lanes: HashMap::new(),
+                center_x: rect.center().x,
+                use_lanes: false,
+            };
+        }
+
+        let available_width = rect.width();
+        let center_x = rect.center().x;
+
+        // Allocate 35% of width to each side, 30% in middle for arrows
+        let left_width = available_width * 0.35;
+        let right_width = available_width * 0.35;
+
+        let left_start = rect.left() + 50.0;  // Some margin from edge
+        let right_end = rect.right() - 50.0;
+
+        let mut left_lanes = HashMap::new();
+        let mut right_lanes = HashMap::new();
+
+        // Calculate left lane positions
+        if !left_path_ids.is_empty() {
+            let lane_spacing = left_width / (left_path_ids.len() as f32 + 1.0);
+            for (i, &path_id) in left_path_ids.iter().enumerate() {
+                let x = left_start + lane_spacing * (i + 1) as f32;
+                left_lanes.insert(path_id, x);
+            }
+        }
+
+        // Calculate right lane positions
+        if !right_path_ids.is_empty() {
+            let lane_spacing = right_width / (right_path_ids.len() as f32 + 1.0);
+            for (i, &path_id) in right_path_ids.iter().enumerate() {
+                let x = right_end - right_width + lane_spacing * (i + 1) as f32;
+                right_lanes.insert(path_id, x);
+            }
+        }
+
+        PathLaneLayout {
+            left_lanes,
+            right_lanes,
+            center_x,
+            use_lanes: true,
+        }
+    }
+
     fn render_single_file_diagram(
         &mut self,
         ui: &mut egui::Ui,
@@ -320,6 +440,27 @@ impl SequenceDiagram {
 
                 let (first_vis, last_vis) = Self::visible_range(viewport, filtered_indices.len());
 
+                // Calculate lane layout if in lane mode
+                let lane_layout = if self.visualization_mode == VisualizationMode::VerticalLanes {
+                    // Collect unique path IDs from visible packets
+                    let mut left_path_ids = BTreeSet::new();
+                    let mut right_path_ids = BTreeSet::new();
+                    for &idx in filtered_indices.iter() {
+                        let packet = &self.cached_packets[idx];
+                        if let Some(pid) = packet.path_id {
+                            match packet.direction {
+                                PacketDirection::Sent => { left_path_ids.insert(pid); },
+                                PacketDirection::Received => { right_path_ids.insert(pid); },
+                            }
+                        }
+                    }
+                    let left_vec: Vec<u64> = left_path_ids.into_iter().collect();
+                    let right_vec: Vec<u64> = right_path_ids.into_iter().collect();
+                    Some(self.calculate_lane_layout(&rect, &left_vec, &right_vec))
+                } else {
+                    None
+                };
+
                 draw_header(
                     &painter,
                     &layout,
@@ -335,7 +476,17 @@ impl SequenceDiagram {
                 let timeline_top =
                     (layout.top_y + first_vis as f32 * PACKET_HEIGHT).max(layout.top_y);
                 let timeline_bottom = layout.top_y + last_vis as f32 * PACKET_HEIGHT;
-                draw_timelines(&painter, &layout, timeline_top, timeline_bottom);
+
+                // Draw timelines (need to draw for each lane if in lane mode)
+                if let Some(ref lanes) = lane_layout {
+                    if lanes.use_lanes {
+                        draw_lane_timelines(&painter, &layout, timeline_top, timeline_bottom, lanes);
+                    } else {
+                        draw_timelines(&painter, &layout, timeline_top, timeline_bottom);
+                    }
+                } else {
+                    draw_timelines(&painter, &layout, timeline_top, timeline_bottom);
+                }
 
                 for vis_idx in first_vis..last_vis {
                     let Some(&pkt_idx) = filtered_indices.get(vis_idx) else {
@@ -353,6 +504,7 @@ impl SequenceDiagram {
                         self.show_loss_markers,
                         self.show_rtt,
                         correlation,
+                        lane_layout.as_ref(),
                     );
 
                     if response.clicked() {
@@ -384,6 +536,17 @@ impl SequenceDiagram {
                     first_vis,
                     filtered_indices.len(),
                 );
+
+                // Collect unique path_ids for legend
+                let mut path_ids: Vec<u64> = filtered_indices
+                    .iter()
+                    .filter_map(|&idx| self.cached_packets.get(idx))
+                    .filter_map(|p| p.path_id)
+                    .collect();
+                path_ids.sort_unstable();
+                path_ids.dedup();
+
+                draw_path_legend(&painter, layout.rect, viewport, &path_ids);
             });
     }
 
@@ -391,11 +554,16 @@ impl SequenceDiagram {
         let left_packets = Self::extract_packets(&left_file.qlog_data).packets;
         let right_packets = Self::extract_packets(&right_file.qlog_data).packets;
 
-        let recv_times = |packets: &[PacketInfo]| -> HashMap<(String, u64), f64> {
+        let recv_times = |packets: &[PacketInfo]| -> HashMap<(String, u64, u64), f64> {
             packets
                 .iter()
                 .filter(|p| p.direction == PacketDirection::Received)
-                .map(|p| ((p.packet_type.clone(), p.packet_number), p.time))
+                .map(|p| {
+                    (
+                        (p.packet_type.clone(), p.packet_number, p.path_id.unwrap_or(0)),
+                        p.time,
+                    )
+                })
                 .collect()
         };
 
@@ -413,7 +581,7 @@ impl SequenceDiagram {
                 .filter(|p| p.direction == PacketDirection::Sent)
             {
                 let recv_time = recv_times
-                    .get(&(p.packet_type.clone(), p.packet_number))
+                    .get(&(p.packet_type.clone(), p.packet_number, p.path_id.unwrap_or(0)))
                     .copied();
                 arrows.push(DualArrow {
                     send_time: p.time,
@@ -421,6 +589,7 @@ impl SequenceDiagram {
                     from_left,
                     packet_type_short: p.packet_type_short.clone(),
                     packet_number: p.packet_number,
+                    path_id: p.path_id,
                     frames: p.frames.clone(),
                     is_lost: recv_time.is_none(),
                     event_idx: p.event_idx,
@@ -592,6 +761,27 @@ impl SequenceDiagram {
                     }
                 };
 
+                // Calculate lane layout if in lane mode
+                let lane_layout = if self.visualization_mode == VisualizationMode::VerticalLanes {
+                    // Collect unique path IDs from arrows by direction
+                    let mut left_path_ids = BTreeSet::new();
+                    let mut right_path_ids = BTreeSet::new();
+                    for arrow in arrows.iter() {
+                        if let Some(pid) = arrow.path_id {
+                            if arrow.from_left {
+                                left_path_ids.insert(pid);
+                            } else {
+                                right_path_ids.insert(pid);
+                            }
+                        }
+                    }
+                    let left_vec: Vec<u64> = left_path_ids.into_iter().collect();
+                    let right_vec: Vec<u64> = right_path_ids.into_iter().collect();
+                    Some(self.calculate_lane_layout(&rect, &left_vec, &right_vec))
+                } else {
+                    None
+                };
+
                 draw_header(
                     &painter,
                     &layout,
@@ -604,12 +794,16 @@ impl SequenceDiagram {
                     RECEIVED_COLOR,
                 );
 
-                draw_timelines(
-                    &painter,
-                    &layout,
-                    layout.top_y,
-                    layout.top_y + total_content_height,
-                );
+                // Draw timelines (need to draw for each lane if in lane mode)
+                if let Some(ref lanes) = lane_layout {
+                    if lanes.use_lanes {
+                        draw_lane_timelines(&painter, &layout, layout.top_y, layout.top_y + total_content_height, lanes);
+                    } else {
+                        draw_timelines(&painter, &layout, layout.top_y, layout.top_y + total_content_height);
+                    }
+                } else {
+                    draw_timelines(&painter, &layout, layout.top_y, layout.top_y + total_content_height);
+                }
 
                 let time_ctx = TimeContext {
                     min_time,
@@ -631,7 +825,7 @@ impl SequenceDiagram {
 
                 let send_time_counts = Self::count_simultaneous_sends(arrows);
                 let arrow_rects =
-                    self.draw_dual_arrows(&painter, &layout, arrows, &send_time_counts, &time_to_y);
+                    self.draw_dual_arrows(&painter, &layout, arrows, &send_time_counts, &time_to_y, lane_layout.as_ref());
 
                 self.handle_dual_selection(
                     ui,
@@ -642,6 +836,16 @@ impl SequenceDiagram {
                 );
 
                 self.draw_selection_indicator(&painter, &layout, viewport, arrow_rects.len());
+
+                // Collect unique path_ids for legend
+                let mut path_ids: Vec<u64> = arrows
+                    .iter()
+                    .filter_map(|a| a.path_id)
+                    .collect();
+                path_ids.sort_unstable();
+                path_ids.dedup();
+
+                draw_path_legend(&painter, layout.rect, viewport, &path_ids);
             });
     }
 
@@ -661,6 +865,7 @@ impl SequenceDiagram {
         arrows: &[DualArrow],
         send_time_counts: &HashMap<i64, usize>,
         time_to_y: &impl Fn(f64) -> f32,
+        lane_layout: Option<&PathLaneLayout>,
     ) -> Vec<(usize, usize, bool, Rect)> {
         let mut arrow_rects = Vec::new();
         let mut send_time_indices: HashMap<i64, usize> = HashMap::new();
@@ -669,11 +874,39 @@ impl SequenceDiagram {
             let y_send = time_to_y(arrow.send_time);
             let y_recv = time_to_y(arrow.recv_time);
 
-            let (start_x, end_x, color) = if arrow.from_left {
-                (layout.left_x, layout.right_x, SENT_COLOR)
+            // Determine start and end positions based on lane mode
+            let (start_x, end_x) = if let Some(lanes) = lane_layout {
+                if lanes.use_lanes {
+                    // Use lane positions
+                    let path_id = arrow.path_id.unwrap_or(0);
+                    if arrow.from_left {
+                        let start = lanes.left_lanes.get(&path_id).copied().unwrap_or(layout.left_x);
+                        let end = lanes.right_lanes.get(&path_id).copied().unwrap_or(layout.right_x);
+                        (start, end)
+                    } else {
+                        let start = lanes.right_lanes.get(&path_id).copied().unwrap_or(layout.right_x);
+                        let end = lanes.left_lanes.get(&path_id).copied().unwrap_or(layout.left_x);
+                        (start, end)
+                    }
+                } else {
+                    // Fallback to color mode
+                    if arrow.from_left {
+                        (layout.left_x, layout.right_x)
+                    } else {
+                        (layout.right_x, layout.left_x)
+                    }
+                }
             } else {
-                (layout.right_x, layout.left_x, RECEIVED_COLOR)
+                // Default positioning (color mode)
+                if arrow.from_left {
+                    (layout.left_x, layout.right_x)
+                } else {
+                    (layout.right_x, layout.left_x)
+                }
             };
+
+            // Use path color for multipath visualization
+            let color = path_color(arrow.path_id.unwrap_or(0));
 
             let time_key = (arrow.send_time * 1000.0) as i64;
             let count = *send_time_counts.get(&time_key).unwrap_or(&1);
@@ -743,6 +976,11 @@ impl SequenceDiagram {
             draw_frame_tags(painter, &arrow.frames, tag_x, tag_y, 32.0, 3);
 
             let info_offset = if arrow.from_left { 5.0 } else { -5.0 };
+            let label = if let Some(pid) = arrow.path_id {
+                format!("{}:{} p{}", arrow.packet_type_short, arrow.packet_number, pid)
+            } else {
+                format!("{}:{}", arrow.packet_type_short, arrow.packet_number)
+            };
             painter.text(
                 Pos2::new(tag_x + info_offset, tag_y - 10.0),
                 if arrow.from_left {
@@ -750,7 +988,7 @@ impl SequenceDiagram {
                 } else {
                     egui::Align2::RIGHT_BOTTOM
                 },
-                format!("{}:{}", arrow.packet_type_short, arrow.packet_number),
+                label,
                 egui::FontId::proportional(8.0),
                 Color32::LIGHT_GRAY,
             );
@@ -879,6 +1117,31 @@ impl SequenceDiagram {
         (first, last)
     }
 
+    /// Extract path_id from event - handles both multipath and regular formats
+    fn extract_path_id(event: &qlog::events::Event, header_path_id: Option<u64>) -> Option<u64> {
+        // Priority 1: header.path_id (multipath format, u64)
+        if let Some(pid) = header_path_id {
+            return Some(pid);
+        }
+
+        // Priority 2: event.ex_data["path_id"] (regular format, string or number)
+        if let Some(value) = event.ex_data.get("path_id") {
+            // Try as string first (common format: "0", "1", etc.)
+            if let Some(s) = value.as_str() {
+                if let Ok(pid) = s.parse::<u64>() {
+                    return Some(pid);
+                }
+            }
+            // Try as number
+            if let Some(n) = value.as_u64() {
+                return Some(n);
+            }
+        }
+
+        // Default: treat as path 0
+        Some(0)
+    }
+
     fn extract_packets(qlog_data: &QlogData) -> ExtractedPackets {
         let mut result = ExtractedPackets::default();
 
@@ -915,12 +1178,16 @@ impl SequenceDiagram {
 
             result.packet_types.insert(packet_type.clone());
 
+            // Unified path_id extraction from both formats
+            let path_id = Self::extract_path_id(event, header.path_id);
+
             result.packets.push(PacketInfo {
                 time: event.time as f64,
                 direction,
                 packet_type,
                 packet_type_short,
                 packet_number: header.packet_number.unwrap_or(0),
+                path_id,
                 frames,
                 stream_ids: pkt_stream_ids,
                 event_idx: idx,
@@ -973,6 +1240,44 @@ fn draw_timelines(painter: &Painter, layout: &DiagramLayout, top: f32, bottom: f
         painter.line_segment(
             [Pos2::new(x, top), Pos2::new(x, bottom)],
             Stroke::new(2.0, Color32::GRAY),
+        );
+    }
+}
+
+fn draw_lane_timelines(
+    painter: &Painter,
+    _layout: &DiagramLayout,
+    top: f32,
+    bottom: f32,
+    lanes: &PathLaneLayout,
+) {
+    // Draw timelines and labels for each lane
+    for (&path_id, &x) in lanes.left_lanes.iter() {
+        painter.line_segment(
+            [Pos2::new(x, top), Pos2::new(x, bottom)],
+            Stroke::new(1.5, Color32::from_rgb(100, 100, 100)),
+        );
+        // Draw path label at top
+        painter.text(
+            Pos2::new(x, top - 15.0),
+            egui::Align2::CENTER_BOTTOM,
+            format!("Path {}", path_id),
+            egui::FontId::proportional(10.0),
+            Color32::LIGHT_GRAY,
+        );
+    }
+    for (&path_id, &x) in lanes.right_lanes.iter() {
+        painter.line_segment(
+            [Pos2::new(x, top), Pos2::new(x, bottom)],
+            Stroke::new(1.5, Color32::from_rgb(100, 100, 100)),
+        );
+        // Draw path label at top
+        painter.text(
+            Pos2::new(x, top - 15.0),
+            egui::Align2::CENTER_BOTTOM,
+            format!("Path {}", path_id),
+            egui::FontId::proportional(10.0),
+            Color32::LIGHT_GRAY,
         );
     }
 }
@@ -1159,24 +1464,61 @@ fn draw_single_packet(
     show_loss_markers: bool,
     show_rtt: bool,
     correlation: &PacketCorrelation,
+    lane_layout: Option<&PathLaneLayout>,
 ) -> Rect {
     let y_start = layout.top_y + (idx as f32 * PACKET_HEIGHT) + PACKET_HEIGHT / 2.0;
     let diagonal_offset = PACKET_HEIGHT * 0.4;
 
-    let (start_x, end_x, y_end, color) = match packet.direction {
-        PacketDirection::Sent => (
-            layout.left_x,
-            layout.right_x,
-            y_start + diagonal_offset,
-            SENT_COLOR,
-        ),
-        PacketDirection::Received => (
-            layout.right_x,
-            layout.left_x,
-            y_start + diagonal_offset,
-            RECEIVED_COLOR,
-        ),
+    // Determine start and end positions based on lane mode
+    let (start_x, end_x, y_end) = if let Some(lanes) = lane_layout {
+        if lanes.use_lanes {
+            // Use lane positions
+            let path_id = packet.path_id.unwrap_or(0);
+            match packet.direction {
+                PacketDirection::Sent => {
+                    let start = lanes.left_lanes.get(&path_id).copied().unwrap_or(layout.left_x);
+                    let end = lanes.right_lanes.get(&path_id).copied().unwrap_or(layout.right_x);
+                    (start, end, y_start + diagonal_offset)
+                },
+                PacketDirection::Received => {
+                    let start = lanes.right_lanes.get(&path_id).copied().unwrap_or(layout.right_x);
+                    let end = lanes.left_lanes.get(&path_id).copied().unwrap_or(layout.left_x);
+                    (start, end, y_start + diagonal_offset)
+                },
+            }
+        } else {
+            // Fallback to color mode
+            match packet.direction {
+                PacketDirection::Sent => (
+                    layout.left_x,
+                    layout.right_x,
+                    y_start + diagonal_offset,
+                ),
+                PacketDirection::Received => (
+                    layout.right_x,
+                    layout.left_x,
+                    y_start + diagonal_offset,
+                ),
+            }
+        }
+    } else {
+        // Default positioning (color mode)
+        match packet.direction {
+            PacketDirection::Sent => (
+                layout.left_x,
+                layout.right_x,
+                y_start + diagonal_offset,
+            ),
+            PacketDirection::Received => (
+                layout.right_x,
+                layout.left_x,
+                y_start + diagonal_offset,
+            ),
+        }
     };
+
+    // Use path color for multipath visualization
+    let color = path_color(packet.path_id.unwrap_or(0));
 
     draw_time_ticks(painter, start_x, y_start, end_x, y_end, color);
     painter.line_segment(
@@ -1212,10 +1554,15 @@ fn draw_single_packet(
     } else {
         start_x + 8.0
     };
+    let label = if let Some(pid) = packet.path_id {
+        format!("{}:{} p{}", packet.packet_type_short, packet.packet_number, pid)
+    } else {
+        format!("{}:{}", packet.packet_type_short, packet.packet_number)
+    };
     painter.text(
         Pos2::new(info_x, mid_y),
         egui::Align2::LEFT_CENTER,
-        format!("{}:{}", packet.packet_type_short, packet.packet_number),
+        label,
         egui::FontId::proportional(10.0),
         Color32::LIGHT_GRAY,
     );
@@ -1236,13 +1583,21 @@ fn draw_single_packet(
 
     if show_loss_markers
         && packet.direction == PacketDirection::Sent
-        && correlation.is_packet_lost(packet.packet_number)
+        && correlation.is_packet_lost(
+            packet.path_id.unwrap_or(0),
+            &packet.packet_type,
+            packet.packet_number,
+        )
     {
         draw_loss_marker(painter, Pos2::new(mid_x, mid_y + 18.0), 14.0);
     }
 
     if show_rtt && packet.direction == PacketDirection::Sent {
-        if let Some(rtt) = correlation.get_rtt(packet.packet_number) {
+        if let Some(rtt) = correlation.get_rtt(
+            packet.path_id.unwrap_or(0),
+            &packet.packet_type,
+            packet.packet_number,
+        ) {
             painter.text(
                 Pos2::new(mid_x + 5.0, y_start - 2.0),
                 egui::Align2::LEFT_BOTTOM,
@@ -1411,12 +1766,83 @@ enum PacketDirection {
     Received,
 }
 
+fn draw_path_legend(painter: &Painter, rect: Rect, viewport: Rect, path_ids: &[u64]) {
+    if path_ids.is_empty() || path_ids.len() == 1 {
+        // Don't show legend for single path
+        return;
+    }
+
+    let legend_width = 100.0;
+    let legend_height = (path_ids.len() as f32 * 22.0) + 12.0;
+    let margin = 10.0;
+
+    // Position in top-right corner relative to viewport
+    let legend_x = rect.right() + viewport.right() - legend_width - margin;
+    let legend_y = rect.top() + viewport.top() + margin;
+
+    let legend_rect = Rect::from_min_size(
+        Pos2::new(legend_x, legend_y),
+        Vec2::new(legend_width, legend_height),
+    );
+
+    // Background
+    painter.rect_filled(
+        legend_rect,
+        4.0,
+        Color32::from_rgba_unmultiplied(40, 40, 45, 230),
+    );
+    painter.rect_stroke(
+        legend_rect,
+        4.0,
+        Stroke::new(1.0, Color32::from_rgb(80, 80, 85)),
+        StrokeKind::Inside,
+    );
+
+    // Title
+    painter.text(
+        Pos2::new(legend_x + 8.0, legend_y + 8.0),
+        egui::Align2::LEFT_TOP,
+        "Paths",
+        egui::FontId::proportional(10.0),
+        Color32::LIGHT_GRAY,
+    );
+
+    // Path entries
+    for (i, &path_id) in path_ids.iter().enumerate() {
+        let y = legend_y + 24.0 + (i as f32 * 22.0);
+        let color = path_color(path_id);
+
+        // Color box
+        let box_rect = Rect::from_min_size(
+            Pos2::new(legend_x + 8.0, y),
+            Vec2::new(14.0, 14.0),
+        );
+        painter.rect_filled(box_rect, 2.0, color);
+        painter.rect_stroke(
+            box_rect,
+            2.0,
+            Stroke::new(1.0, Color32::from_rgb(60, 60, 65)),
+            StrokeKind::Inside,
+        );
+
+        // Path ID label
+        painter.text(
+            Pos2::new(legend_x + 28.0, y + 7.0),
+            egui::Align2::LEFT_CENTER,
+            format!("Path {}", path_id),
+            egui::FontId::proportional(10.0),
+            Color32::LIGHT_GRAY,
+        );
+    }
+}
+
 struct PacketInfo {
     time: f64,
     direction: PacketDirection,
     packet_type: String,
     packet_type_short: String,
     packet_number: u64,
+    path_id: Option<u64>,
     frames: Vec<FrameType>,
     stream_ids: Vec<u64>,
     event_idx: usize,

@@ -2164,6 +2164,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "n0-qlog"
+version = "0.15.2"
+source = "git+https://github.com/n0-computer/n0-qlog?branch=qlog-11-multipath#51bd4e2d93928b8d5c0a09dae6a17ca8269e7428"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_with",
+ "smallvec",
+]
+
+[[package]]
 name = "n0qlog"
 version = "0.3.0"
 dependencies = [
@@ -2174,8 +2185,8 @@ dependencies = [
  "egui_extras",
  "egui_plot",
  "image",
+ "n0-qlog",
  "parking_lot",
- "qlog",
  "rayon",
  "rfd",
  "serde",
@@ -2907,18 +2918,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3cbdf373972bf78df4d3b518d07003938e2c7d1fb5891e55f9cb6df57009d84"
 dependencies = [
  "num-traits",
-]
-
-[[package]]
-name = "qlog"
-version = "0.15.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f15b83c59e6b945f2261c95a1dd9faf239187f32ff0a96af1d1d28c4557f919"
-dependencies = [
- "serde",
- "serde_json",
- "serde_with",
- "smallvec",
 ]
 
 [[package]]

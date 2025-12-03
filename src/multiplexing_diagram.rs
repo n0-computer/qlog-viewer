@@ -83,18 +83,19 @@ impl MultiplexingDiagram {
                     if let Some(ref frames) = data.frames {
                         for frame in frames.iter() {
                             if let QuicFrame::Stream {
-                                stream_id, length, ..
+                                stream_id, raw, ..
                             } = frame
                             {
                                 total_segments += 1;
                                 let current_total: usize =
                                     stream_data.values().map(|v| v.len()).sum();
                                 if current_total < self.max_segments {
-                                    let duration = (*length as f64 / 1000.0).max(0.1);
+                                    let length = raw.as_ref().and_then(|r| r.length).unwrap_or(1000);
+                                    let duration = (length as f64 / 1000.0).max(0.1);
                                     stream_data.entry(*stream_id).or_default().push((
                                         time,
                                         time + duration,
-                                        *length,
+                                        length,
                                     ));
                                 }
                             }
@@ -105,18 +106,19 @@ impl MultiplexingDiagram {
                     if let Some(ref frames) = data.frames {
                         for frame in frames.iter() {
                             if let QuicFrame::Stream {
-                                stream_id, length, ..
+                                stream_id, raw, ..
                             } = frame
                             {
                                 total_segments += 1;
                                 let current_total: usize =
                                     stream_data.values().map(|v| v.len()).sum();
                                 if current_total < self.max_segments {
-                                    let duration = (*length as f64 / 1000.0).max(0.1);
+                                    let length = raw.as_ref().and_then(|r| r.length).unwrap_or(1000);
+                                    let duration = (length as f64 / 1000.0).max(0.1);
                                     stream_data.entry(*stream_id).or_default().push((
                                         time,
                                         time + duration,
-                                        *length,
+                                        length,
                                     ));
                                 }
                             }
@@ -126,17 +128,18 @@ impl MultiplexingDiagram {
                 EventData::FramesProcessed(data) => {
                     for frame in data.frames.iter() {
                         if let QuicFrame::Stream {
-                            stream_id, length, ..
+                            stream_id, raw, ..
                         } = frame
                         {
                             total_segments += 1;
                             let current_total: usize = stream_data.values().map(|v| v.len()).sum();
                             if current_total < self.max_segments {
-                                let duration = (*length as f64 / 1000.0).max(0.1);
+                                let length = raw.as_ref().and_then(|r| r.length).unwrap_or(1000);
+                                let duration = (length as f64 / 1000.0).max(0.1);
                                 stream_data.entry(*stream_id).or_default().push((
                                     time,
                                     time + duration,
-                                    *length,
+                                    length,
                                 ));
                             }
                         }

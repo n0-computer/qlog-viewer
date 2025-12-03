@@ -22,6 +22,15 @@ pub enum FrameType {
     RetireConnectionId,
     PathChallenge,
     PathResponse,
+    PathAck,
+    PathAbandon,
+    PathStatusAvailable,
+    PathStatusBackup,
+    PathNewConnectionId,
+    PathRetireConnectionId,
+    PathsBlocked,
+    PathCidsBlocked,
+    MaxPathId,
     ConnectionClose,
     HandshakeDone,
     Datagram,
@@ -50,18 +59,31 @@ impl FrameType {
             QuicFrame::RetireConnectionId { .. } => Self::RetireConnectionId,
             QuicFrame::PathChallenge { .. } => Self::PathChallenge,
             QuicFrame::PathResponse { .. } => Self::PathResponse,
+            QuicFrame::PathAck { .. } => Self::PathAck,
+            QuicFrame::PathAbandon { .. } => Self::PathAbandon,
+            QuicFrame::PathStatusAvailable { .. } => Self::PathStatusAvailable,
+            QuicFrame::PathStatusBackup { .. } => Self::PathStatusBackup,
+            QuicFrame::PathNewConnectionId { .. } => Self::PathNewConnectionId,
+            QuicFrame::PathRetireConnectionId { .. } => Self::PathRetireConnectionId,
+            QuicFrame::PathsBlocked { .. } => Self::PathsBlocked,
+            QuicFrame::PathCidsBlocked { .. } => Self::PathCidsBlocked,
+            QuicFrame::MaxPathId { .. } => Self::MaxPathId,
             QuicFrame::ConnectionClose { .. } => Self::ConnectionClose,
-            QuicFrame::HandshakeDone => Self::HandshakeDone,
+            QuicFrame::HandshakeDone { .. } => Self::HandshakeDone,
             QuicFrame::Datagram { .. } => Self::Datagram,
             QuicFrame::Unknown {
-                raw_frame_type,
+                frame_type_bytes,
                 raw,
                 ..
             } => {
                 let name = raw
                     .as_ref()
                     .and_then(|r| r.data.clone())
-                    .unwrap_or_else(|| format!("0x{:X}", raw_frame_type));
+                    .unwrap_or_else(|| {
+                        frame_type_bytes
+                            .map(|ftb| format!("0x{:X}", ftb))
+                            .unwrap_or_else(|| "Unknown".to_string())
+                    });
                 Self::Custom(name)
             }
         }
@@ -88,6 +110,15 @@ impl FrameType {
             Self::RetireConnectionId => "RETIRE_CONNECTION_ID".to_string(),
             Self::PathChallenge => "PATH_CHALLENGE".to_string(),
             Self::PathResponse => "PATH_RESPONSE".to_string(),
+            Self::PathAck => "PATH_ACK".to_string(),
+            Self::PathAbandon => "PATH_ABANDON".to_string(),
+            Self::PathStatusAvailable => "PATH_STATUS_AVAILABLE".to_string(),
+            Self::PathStatusBackup => "PATH_STATUS_BACKUP".to_string(),
+            Self::PathNewConnectionId => "PATH_NEW_CONNECTION_ID".to_string(),
+            Self::PathRetireConnectionId => "PATH_RETIRE_CONNECTION_ID".to_string(),
+            Self::PathsBlocked => "PATHS_BLOCKED".to_string(),
+            Self::PathCidsBlocked => "PATH_CIDS_BLOCKED".to_string(),
+            Self::MaxPathId => "MAX_PATH_ID".to_string(),
             Self::ConnectionClose => "CONNECTION_CLOSE".to_string(),
             Self::HandshakeDone => "HANDSHAKE_DONE".to_string(),
             Self::Datagram => "DATAGRAM".to_string(),
@@ -114,6 +145,15 @@ impl FrameType {
             Self::RetireConnectionId => "RCI".to_string(),
             Self::PathChallenge => "PCH".to_string(),
             Self::PathResponse => "PRS".to_string(),
+            Self::PathAck => "PAK".to_string(),
+            Self::PathAbandon => "PAB".to_string(),
+            Self::PathStatusAvailable => "PSA".to_string(),
+            Self::PathStatusBackup => "PSB".to_string(),
+            Self::PathNewConnectionId => "PNC".to_string(),
+            Self::PathRetireConnectionId => "PRC".to_string(),
+            Self::PathsBlocked => "PBK".to_string(),
+            Self::PathCidsBlocked => "PCB".to_string(),
+            Self::MaxPathId => "MPI".to_string(),
             Self::ConnectionClose => "CLS".to_string(),
             Self::HandshakeDone => "HSD".to_string(),
             Self::Datagram => "DGM".to_string(),
@@ -246,9 +286,9 @@ pub fn get_frame_stream_id(frame: &QuicFrame) -> Option<u64> {
 /// Get frame size from a QUIC frame if applicable.
 pub fn get_frame_size(frame: &QuicFrame) -> Option<u64> {
     match frame {
-        QuicFrame::Stream { length, .. }
-        | QuicFrame::Crypto { length, .. }
-        | QuicFrame::Datagram { length, .. } => Some(*length),
+        QuicFrame::Stream { raw, .. }
+        | QuicFrame::Crypto { raw, .. }
+        | QuicFrame::Datagram { raw, .. } => raw.as_ref().and_then(|r| r.length),
         _ => None,
     }
 }
