@@ -45,6 +45,19 @@ struct SelectedArrowRenderData {
     y_send: f32,
 }
 
+/// Data for arrow interaction (click/selection)
+struct ArrowInteractionData {
+    arrow_idx: usize,
+    sent_event_idx: usize,
+    recv_event_idx: Option<usize>,
+    from_left: bool,
+    rect: Rect,
+    line_start_x: f32,
+    line_start_y: f32,
+    line_end_x: f32,
+    line_end_y: f32,
+}
+
 fn path_color(path_id: u64) -> Color32 {
     if let Some(&(r, g, b)) = PATH_COLORS.get(path_id as usize) {
         Color32::from_rgb(r, g, b)
@@ -1050,7 +1063,7 @@ impl SequenceDiagram {
         time_to_y: &impl Fn(f64) -> f32,
         lane_layout: Option<&PathLaneLayout>,
         viewport: &Rect,
-    ) -> Vec<(usize, usize, Option<usize>, bool, Rect)> {
+    ) -> Vec<ArrowInteractionData> {
         let arrows = &self.arrows;
         let mut arrow_rects = Vec::new();
         let mut send_time_indices: HashMap<i64, usize> = HashMap::new();
@@ -1172,13 +1185,17 @@ impl SequenceDiagram {
                         y_send_adjusted.max(actual_end_y) + 12.0,
                     ),
                 );
-                arrow_rects.push((
+                arrow_rects.push(ArrowInteractionData {
                     arrow_idx,
-                    arrow.sent_event_idx,
-                    arrow.recv_event_idx,
-                    arrow.from_left,
-                    arrow_rect,
-                ));
+                    sent_event_idx: arrow.sent_event_idx,
+                    recv_event_idx: arrow.recv_event_idx,
+                    from_left: arrow.from_left,
+                    rect: arrow_rect,
+                    line_start_x: start_x,
+                    line_start_y: y_send_adjusted,
+                    line_end_x: actual_end_x,
+                    line_end_y: actual_end_y,
+                });
                 continue; // Skip rendering in first pass, will render on top later
             }
 
@@ -1340,13 +1357,17 @@ impl SequenceDiagram {
                     y_send_adjusted.max(actual_end_y) + 12.0,
                 ),
             );
-            arrow_rects.push((
+            arrow_rects.push(ArrowInteractionData {
                 arrow_idx,
-                arrow.sent_event_idx,
-                arrow.recv_event_idx,
-                arrow.from_left,
-                arrow_rect,
-            ));
+                sent_event_idx: arrow.sent_event_idx,
+                recv_event_idx: arrow.recv_event_idx,
+                from_left: arrow.from_left,
+                rect: arrow_rect,
+                line_start_x: start_x,
+                line_start_y: y_send_adjusted,
+                line_end_x: actual_end_x,
+                line_end_y: actual_end_y,
+            });
         }
 
         // Second pass: render selected arrow on top
@@ -1572,7 +1593,7 @@ impl SequenceDiagram {
         &mut self,
         ui: &egui::Ui,
         response: &Response,
-        arrow_rects: &[(usize, usize, Option<usize>, bool, Rect)],
+        arrow_rects: &[ArrowInteractionData],
         selected_event_idx: &mut Option<usize>,
         recv_selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
@@ -1581,14 +1602,35 @@ impl SequenceDiagram {
 
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
-                if let Some((idx, sent_event_idx, recv_event_idx, from_left, _)) = arrow_rects
+                // Find arrow with minimum orthogonal distance to click point
+                let max_click_distance = 15.0;
+                let closest = arrow_rects
                     .iter()
-                    .find(|(_, _, _, _, rect)| rect.contains(pos))
-                {
-                    self.selected_packet_idx = Some(*idx);
-                    *selected_event_idx = Some(*sent_event_idx);
-                    *recv_selected_event_idx = *recv_event_idx;
-                    *selected_file_idx = if *from_left { 0 } else { 1 };
+                    .filter_map(|data| {
+                        if !data.rect.contains(pos) {
+                            return None;
+                        }
+                        let dist = Self::point_to_line_segment_distance(
+                            pos.x,
+                            pos.y,
+                            data.line_start_x,
+                            data.line_start_y,
+                            data.line_end_x,
+                            data.line_end_y,
+                        );
+                        if dist <= max_click_distance {
+                            Some((data, dist))
+                        } else {
+                            None
+                        }
+                    })
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                if let Some((data, _dist)) = closest {
+                    self.selected_packet_idx = Some(data.arrow_idx);
+                    *selected_event_idx = Some(data.sent_event_idx);
+                    *recv_selected_event_idx = data.recv_event_idx;
+                    *selected_file_idx = if data.from_left { 0 } else { 1 };
                 } else {
                     // Click on empty space clears selection
                     self.selected_packet_idx = None;
@@ -1628,12 +1670,10 @@ impl SequenceDiagram {
             if new_idx != current_idx || self.selected_packet_idx.is_none() {
                 self.selected_packet_idx = Some(new_idx);
                 // Try to get event info from visible rects first
-                if let Some((_, sent_event_idx, recv_event_idx, from_left, _)) =
-                    arrow_rects.iter().find(|(idx, _, _, _, _)| *idx == new_idx)
-                {
-                    *selected_event_idx = Some(*sent_event_idx);
-                    *recv_selected_event_idx = *recv_event_idx;
-                    *selected_file_idx = if *from_left { 0 } else { 1 };
+                if let Some(data) = arrow_rects.iter().find(|d| d.arrow_idx == new_idx) {
+                    *selected_event_idx = Some(data.sent_event_idx);
+                    *recv_selected_event_idx = data.recv_event_idx;
+                    *selected_file_idx = if data.from_left { 0 } else { 1 };
                 } else if let Some(arrow) = self.arrows.get(new_idx) {
                     // Arrow not visible, get info directly from arrows list
                     *selected_event_idx = Some(arrow.sent_event_idx);
@@ -1663,6 +1703,25 @@ impl SequenceDiagram {
                 Color32::YELLOW,
             );
         }
+    }
+
+    /// Calculate perpendicular distance from a point to a line segment
+    fn point_to_line_segment_distance(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let len_sq = dx * dx + dy * dy;
+
+        if len_sq == 0.0 {
+            return ((px - x1).powi(2) + (py - y1).powi(2)).sqrt();
+        }
+
+        let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+        let t = t.clamp(0.0, 1.0);
+
+        let proj_x = x1 + t * dx;
+        let proj_y = y1 + t * dy;
+
+        ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
     }
 
     /// Get a human-readable name for an EventData variant
