@@ -32,6 +32,32 @@ const PATH_COLORS: &[(u8, u8, u8)] = &[
     (22, 160, 133), // Teal (path 5)
 ];
 
+/// Data needed to render a selected arrow in the second pass (on top of other arrows)
+struct SelectedArrowRenderData {
+    arrow_idx: usize,
+    start_x: f32,
+    y_send_adjusted: f32,
+    actual_end_x: f32,
+    actual_end_y: f32,
+    is_truncated: bool,
+    count: usize,
+    idx: usize,
+    y_send: f32,
+}
+
+/// Data for arrow interaction (click/selection)
+struct ArrowInteractionData {
+    arrow_idx: usize,
+    sent_event_idx: usize,
+    recv_event_idx: Option<usize>,
+    from_left: bool,
+    rect: Rect,
+    line_start_x: f32,
+    line_start_y: f32,
+    line_end_x: f32,
+    line_end_y: f32,
+}
+
 fn path_color(path_id: u64) -> Color32 {
     if let Some(&(r, g, b)) = PATH_COLORS.get(path_id as usize) {
         Color32::from_rgb(r, g, b)
@@ -1037,7 +1063,7 @@ impl SequenceDiagram {
         time_to_y: &impl Fn(f64) -> f32,
         lane_layout: Option<&PathLaneLayout>,
         viewport: &Rect,
-    ) -> Vec<(usize, usize, Option<usize>, bool, Rect)> {
+    ) -> Vec<ArrowInteractionData> {
         let arrows = &self.arrows;
         let mut arrow_rects = Vec::new();
         let mut send_time_indices: HashMap<i64, usize> = HashMap::new();
@@ -1046,6 +1072,10 @@ impl SequenceDiagram {
         let margin = 50.0;
         let visible_min_y = layout.rect.top() + viewport.top() - margin;
         let visible_max_y = layout.rect.top() + viewport.bottom() + margin;
+
+        // Store selected arrow data for deferred rendering (to draw on top)
+        let has_selection = self.selected_packet_idx.is_some();
+        let mut selected_arrow_data: Option<SelectedArrowRenderData> = None;
 
         for (arrow_idx, arrow) in arrows.iter().enumerate() {
             let y_send = time_to_y(arrow.send_time);
@@ -1130,9 +1160,53 @@ impl SequenceDiagram {
                 };
 
             let is_selected = self.selected_packet_idx == Some(arrow_idx);
-            let line_color = if is_selected { Color32::YELLOW } else { color };
-            let line_width = if is_selected { 3.0 } else { 1.5 };
-            let marker_size = if is_selected { 5.0 } else { 3.0 };
+
+            // Store selected arrow data for deferred rendering (to draw on top)
+            if is_selected {
+                selected_arrow_data = Some(SelectedArrowRenderData {
+                    arrow_idx,
+                    start_x,
+                    y_send_adjusted,
+                    actual_end_x,
+                    actual_end_y,
+                    is_truncated,
+                    count,
+                    idx,
+                    y_send,
+                });
+                // Still need to add to arrow_rects for interaction
+                let arrow_rect = Rect::from_two_pos(
+                    Pos2::new(
+                        start_x.min(actual_end_x) - 5.0,
+                        y_send_adjusted.min(actual_end_y) - 12.0,
+                    ),
+                    Pos2::new(
+                        start_x.max(actual_end_x) + 5.0,
+                        y_send_adjusted.max(actual_end_y) + 12.0,
+                    ),
+                );
+                arrow_rects.push(ArrowInteractionData {
+                    arrow_idx,
+                    sent_event_idx: arrow.sent_event_idx,
+                    recv_event_idx: arrow.recv_event_idx,
+                    from_left: arrow.from_left,
+                    rect: arrow_rect,
+                    line_start_x: start_x,
+                    line_start_y: y_send_adjusted,
+                    line_end_x: actual_end_x,
+                    line_end_y: actual_end_y,
+                });
+                continue; // Skip rendering in first pass, will render on top later
+            }
+
+            let line_color = if has_selection {
+                // Dim non-selected arrows when something is selected (~16% opacity)
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40)
+            } else {
+                color
+            };
+            let line_width = 1.5;
+            let marker_size = 3.0;
 
             painter.line_segment(
                 [
@@ -1179,12 +1253,12 @@ impl SequenceDiagram {
                 Pos2::new(start_x, y_send_adjusted),
                 Pos2::new(actual_end_x, actual_end_y),
                 arrow_idx,
+                false, // is_selected - always false in first pass (selected arrows are deferred)
+                has_selection,
             );
 
             // Draw packet label if enabled
             if self.show_packet_labels {
-                let info_offset = if arrow.from_left { 5.0 } else { -5.0 };
-
                 // Build label with packet info and optional tuple remote address
                 let base_label = if let Some(pid) = arrow.packet.path_id {
                     format!(
@@ -1219,16 +1293,38 @@ impl SequenceDiagram {
                     base_label
                 };
 
-                painter.text(
-                    Pos2::new(tag_x + info_offset, tag_y - 10.0),
-                    if arrow.from_left {
-                        egui::Align2::LEFT_BOTTOM
-                    } else {
-                        egui::Align2::RIGHT_BOTTOM
-                    },
-                    label,
-                    egui::FontId::proportional(10.0),
-                    Color32::LIGHT_GRAY,
+                let label_color = if has_selection {
+                    Color32::from_rgba_unmultiplied(180, 180, 180, 40) // ~16% dimmed
+                } else {
+                    Color32::LIGHT_GRAY
+                };
+
+                // Calculate line direction and perpendicular for label positioning
+                let dx = actual_end_x - start_x;
+                let dy = actual_end_y - y_send_adjusted;
+                let line_len = (dx * dx + dy * dy).sqrt().max(1.0);
+                let ux = dx / line_len;
+                let uy = dy / line_len;
+                let px = -uy; // perpendicular
+                let py = ux;
+
+                // Position packet label ABOVE the line (positive perpendicular offset)
+                // Frame tags go BELOW (negative perpendicular offset)
+                let label_perp_offset = 25.0;
+
+                let label_x = tag_x + label_perp_offset * px;
+                let label_y = tag_y + label_perp_offset * py;
+
+                // Calculate rotation angle to align with line
+                let angle = dy.atan2(dx);
+
+                draw_rotated_text(
+                    painter,
+                    Pos2::new(label_x, label_y),
+                    angle,
+                    &label,
+                    egui::FontId::proportional(12.0),
+                    label_color,
                 );
             }
 
@@ -1261,13 +1357,233 @@ impl SequenceDiagram {
                     y_send_adjusted.max(actual_end_y) + 12.0,
                 ),
             );
-            arrow_rects.push((
+            arrow_rects.push(ArrowInteractionData {
                 arrow_idx,
-                arrow.sent_event_idx,
-                arrow.recv_event_idx,
-                arrow.from_left,
-                arrow_rect,
-            ));
+                sent_event_idx: arrow.sent_event_idx,
+                recv_event_idx: arrow.recv_event_idx,
+                from_left: arrow.from_left,
+                rect: arrow_rect,
+                line_start_x: start_x,
+                line_start_y: y_send_adjusted,
+                line_end_x: actual_end_x,
+                line_end_y: actual_end_y,
+            });
+        }
+
+        // Second pass: render selected arrow on top
+        if let Some(SelectedArrowRenderData {
+            arrow_idx: sel_arrow_idx,
+            start_x,
+            y_send_adjusted,
+            actual_end_x,
+            actual_end_y,
+            is_truncated,
+            count,
+            idx,
+            y_send,
+        }) = selected_arrow_data
+        {
+            if let Some(arrow) = arrows.get(sel_arrow_idx) {
+                let line_color = Color32::YELLOW;
+                let line_width = 3.0;
+                let marker_size = 5.0;
+                let shadow_offset = 2.0;
+                let shadow_color = Color32::from_rgba_unmultiplied(0, 0, 0, 80);
+
+                // Draw shadow for main line
+                painter.line_segment(
+                    [
+                        Pos2::new(start_x + shadow_offset, y_send_adjusted + shadow_offset),
+                        Pos2::new(actual_end_x + shadow_offset, actual_end_y + shadow_offset),
+                    ],
+                    Stroke::new(line_width + 2.0, shadow_color),
+                );
+
+                // Draw main line
+                painter.line_segment(
+                    [
+                        Pos2::new(start_x, y_send_adjusted),
+                        Pos2::new(actual_end_x, actual_end_y),
+                    ],
+                    Stroke::new(line_width, line_color),
+                );
+
+                let tick_half = 4.0;
+
+                // Shadow for start tick
+                painter.line_segment(
+                    [
+                        Pos2::new(
+                            start_x - tick_half + shadow_offset,
+                            y_send_adjusted + shadow_offset,
+                        ),
+                        Pos2::new(
+                            start_x + tick_half + shadow_offset,
+                            y_send_adjusted + shadow_offset,
+                        ),
+                    ],
+                    Stroke::new(3.0, shadow_color),
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(start_x - tick_half, y_send_adjusted),
+                        Pos2::new(start_x + tick_half, y_send_adjusted),
+                    ],
+                    Stroke::new(2.0, line_color),
+                );
+
+                // Shadow for start marker
+                painter.circle_filled(
+                    Pos2::new(start_x + shadow_offset, y_send_adjusted + shadow_offset),
+                    marker_size + 1.0,
+                    shadow_color,
+                );
+                painter.circle_filled(Pos2::new(start_x, y_send_adjusted), marker_size, line_color);
+
+                if !is_truncated {
+                    // Shadow for end tick
+                    painter.line_segment(
+                        [
+                            Pos2::new(
+                                actual_end_x - tick_half + shadow_offset,
+                                actual_end_y + shadow_offset,
+                            ),
+                            Pos2::new(
+                                actual_end_x + tick_half + shadow_offset,
+                                actual_end_y + shadow_offset,
+                            ),
+                        ],
+                        Stroke::new(3.0, shadow_color),
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(actual_end_x - tick_half, actual_end_y),
+                            Pos2::new(actual_end_x + tick_half, actual_end_y),
+                        ],
+                        Stroke::new(2.0, line_color),
+                    );
+
+                    draw_arrowhead(
+                        painter,
+                        Pos2::new(start_x, y_send_adjusted),
+                        Pos2::new(actual_end_x, actual_end_y),
+                        line_color,
+                        12.0,
+                    );
+                }
+
+                let tag_x = (start_x + actual_end_x) / 2.0;
+                let tag_y = (y_send_adjusted + actual_end_y) / 2.0;
+
+                draw_frame_tags(
+                    painter,
+                    &arrow.packet.frames,
+                    Pos2::new(start_x, y_send_adjusted),
+                    Pos2::new(actual_end_x, actual_end_y),
+                    sel_arrow_idx,
+                    true, // is_selected
+                    true, // has_selection
+                );
+
+                // Draw packet label if enabled
+                if self.show_packet_labels {
+                    let base_label = if let Some(pid) = arrow.packet.path_id {
+                        format!(
+                            "{}:{} p{}",
+                            arrow.packet.packet_type_short, arrow.packet.packet_number, pid
+                        )
+                    } else {
+                        format!(
+                            "{}:{}",
+                            arrow.packet.packet_type_short, arrow.packet.packet_number
+                        )
+                    };
+
+                    let label = if let Some(tuple_id) = &arrow.packet.tuple_id {
+                        let tuple_map = if arrow.from_left {
+                            &self.tuple_map_left
+                        } else {
+                            &self.tuple_map_right
+                        };
+                        if let Some(tuple_info) = tuple_map.get(tuple_id) {
+                            if let Some(ref remote) = tuple_info.remote_addr {
+                                format!("{} [{}]", base_label, remote)
+                            } else {
+                                base_label
+                            }
+                        } else {
+                            base_label
+                        }
+                    } else {
+                        base_label
+                    };
+
+                    // Calculate line direction and perpendicular for label positioning
+                    let dx = actual_end_x - start_x;
+                    let dy = actual_end_y - y_send_adjusted;
+                    let line_len = (dx * dx + dy * dy).sqrt().max(1.0);
+                    let px = -dy / line_len; // perpendicular x
+                    let py = dx / line_len; // perpendicular y
+
+                    // Position packet label ABOVE the line (positive perpendicular offset)
+                    let label_perp_offset = 25.0;
+                    let label_x = tag_x + label_perp_offset * px;
+                    let label_y = tag_y + label_perp_offset * py;
+
+                    // Calculate approximate label dimensions for background
+                    let font_size = 12.0;
+                    let char_width = font_size * 0.48;
+                    let label_width = label.len() as f32 * char_width + 8.0;
+                    let label_height = font_size + 4.0;
+
+                    let bg_rect = Rect::from_center_size(
+                        Pos2::new(label_x, label_y),
+                        Vec2::new(label_width, label_height),
+                    );
+
+                    // Draw shadow for label background
+                    let shadow_rect = bg_rect.translate(Vec2::new(2.0, 2.0));
+                    painter.rect_filled(
+                        shadow_rect,
+                        3.0,
+                        Color32::from_rgba_unmultiplied(0, 0, 0, 60),
+                    );
+
+                    // Draw translucent background
+                    painter.rect_filled(
+                        bg_rect,
+                        3.0,
+                        Color32::from_rgba_unmultiplied(0, 0, 0, 160),
+                    );
+
+                    painter.text(
+                        Pos2::new(label_x, label_y),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(font_size),
+                        Color32::WHITE,
+                    );
+                }
+
+                if is_truncated {
+                    draw_loss_marker(painter, Pos2::new(actual_end_x, actual_end_y), 10.0);
+                }
+
+                if count > 1 && idx == 0 {
+                    let indicator_x = start_x + (if arrow.from_left { 8.0 } else { -8.0 });
+                    painter.text(
+                        Pos2::new(indicator_x, y_send),
+                        if arrow.from_left {
+                            egui::Align2::LEFT_CENTER
+                        } else {
+                            egui::Align2::RIGHT_CENTER
+                        },
+                        format!("x{}", count),
+                        egui::FontId::proportional(9.0),
+                        Color32::YELLOW,
+                    );
+                }
+            }
         }
 
         arrow_rects
@@ -1277,7 +1593,7 @@ impl SequenceDiagram {
         &mut self,
         ui: &egui::Ui,
         response: &Response,
-        arrow_rects: &[(usize, usize, Option<usize>, bool, Rect)],
+        arrow_rects: &[ArrowInteractionData],
         selected_event_idx: &mut Option<usize>,
         recv_selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
@@ -1286,14 +1602,40 @@ impl SequenceDiagram {
 
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
-                if let Some((idx, sent_event_idx, recv_event_idx, from_left, _)) = arrow_rects
+                // Find arrow with minimum orthogonal distance to click point
+                let max_click_distance = 15.0;
+                let closest = arrow_rects
                     .iter()
-                    .find(|(_, _, _, _, rect)| rect.contains(pos))
-                {
-                    self.selected_packet_idx = Some(*idx);
-                    *selected_event_idx = Some(*sent_event_idx);
-                    *recv_selected_event_idx = *recv_event_idx;
-                    *selected_file_idx = if *from_left { 0 } else { 1 };
+                    .filter_map(|data| {
+                        if !data.rect.contains(pos) {
+                            return None;
+                        }
+                        let dist = Self::point_to_line_segment_distance(
+                            pos.x,
+                            pos.y,
+                            data.line_start_x,
+                            data.line_start_y,
+                            data.line_end_x,
+                            data.line_end_y,
+                        );
+                        if dist <= max_click_distance {
+                            Some((data, dist))
+                        } else {
+                            None
+                        }
+                    })
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                if let Some((data, _dist)) = closest {
+                    self.selected_packet_idx = Some(data.arrow_idx);
+                    *selected_event_idx = Some(data.sent_event_idx);
+                    *recv_selected_event_idx = data.recv_event_idx;
+                    *selected_file_idx = if data.from_left { 0 } else { 1 };
+                } else {
+                    // Click on empty space clears selection
+                    self.selected_packet_idx = None;
+                    *selected_event_idx = None;
+                    *recv_selected_event_idx = None;
                 }
             }
         }
@@ -1302,12 +1644,20 @@ impl SequenceDiagram {
             return;
         }
 
-        let (up, down) = ui.input(|i| {
+        let (up, down, esc) = ui.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowUp),
                 i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::Escape),
             )
         });
+
+        if esc {
+            self.selected_packet_idx = None;
+            *selected_event_idx = None;
+            *recv_selected_event_idx = None;
+            return;
+        }
 
         if up || down {
             let current_idx = self.selected_packet_idx.unwrap_or(0);
@@ -1320,12 +1670,10 @@ impl SequenceDiagram {
             if new_idx != current_idx || self.selected_packet_idx.is_none() {
                 self.selected_packet_idx = Some(new_idx);
                 // Try to get event info from visible rects first
-                if let Some((_, sent_event_idx, recv_event_idx, from_left, _)) =
-                    arrow_rects.iter().find(|(idx, _, _, _, _)| *idx == new_idx)
-                {
-                    *selected_event_idx = Some(*sent_event_idx);
-                    *recv_selected_event_idx = *recv_event_idx;
-                    *selected_file_idx = if *from_left { 0 } else { 1 };
+                if let Some(data) = arrow_rects.iter().find(|d| d.arrow_idx == new_idx) {
+                    *selected_event_idx = Some(data.sent_event_idx);
+                    *recv_selected_event_idx = data.recv_event_idx;
+                    *selected_file_idx = if data.from_left { 0 } else { 1 };
                 } else if let Some(arrow) = self.arrows.get(new_idx) {
                     // Arrow not visible, get info directly from arrows list
                     *selected_event_idx = Some(arrow.sent_event_idx);
@@ -1355,6 +1703,25 @@ impl SequenceDiagram {
                 Color32::YELLOW,
             );
         }
+    }
+
+    /// Calculate perpendicular distance from a point to a line segment
+    fn point_to_line_segment_distance(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let len_sq = dx * dx + dy * dy;
+
+        if len_sq == 0.0 {
+            return ((px - x1).powi(2) + (py - y1).powi(2)).sqrt();
+        }
+
+        let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+        let t = t.clamp(0.0, 1.0);
+
+        let proj_x = x1 + t * dx;
+        let proj_y = y1 + t * dy;
+
+        ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
     }
 
     /// Get a human-readable name for an EventData variant
@@ -2809,7 +3176,9 @@ fn draw_frame_tags(
     frames: &[FrameType],
     line_start: Pos2,
     line_end: Pos2,
-    arrow_idx: usize,
+    _arrow_idx: usize,
+    is_selected: bool,
+    has_selection: bool,
 ) {
     if frames.is_empty() {
         return;
@@ -2844,7 +3213,7 @@ fn draw_frame_tags(
     let px = -uy;
     let py = ux;
 
-    let tag_height = 14.0;
+    let tag_height = 16.0;
     let tag_gap = 4.0;
 
     // Calculate tag widths based on content
@@ -2873,7 +3242,9 @@ fn draw_frame_tags(
 
     // Alternate perpendicular offset based on arrow index to reduce overlap
     // Even-indexed arrows get tags on one side, odd-indexed on the other
-    let base_perp_offset = if arrow_idx % 2 == 0 { -14.0 } else { 14.0 };
+    // Frame tags always BELOW the line (negative perpendicular offset)
+    // Packet labels go ABOVE (positive perpendicular offset)
+    let base_perp_offset = -18.0;
 
     // Calculate how many tags fit per row
     let available_len = line_len * 0.8;
@@ -2897,13 +3268,38 @@ fn draw_frame_tags(
                 Vec2::new(*width, tag_height),
             );
 
-            painter.rect_filled(tag_rect, 2.0, *color);
+            let (bg_color, text_color) = if is_selected {
+                (*color, Color32::WHITE)
+            } else if has_selection {
+                (
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 40),
+                )
+            } else {
+                (*color, Color32::WHITE)
+            };
+
+            // Draw shadow for selected tags
+            if is_selected {
+                let shadow_offset = 2.0;
+                let shadow_rect = Rect::from_center_size(
+                    Pos2::new(tag_center_x + shadow_offset, tag_center_y + shadow_offset),
+                    Vec2::new(*width, tag_height),
+                );
+                painter.rect_filled(
+                    shadow_rect,
+                    2.0,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 80),
+                );
+            }
+
+            painter.rect_filled(tag_rect, 2.0, bg_color);
             painter.text(
                 tag_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 text,
-                egui::FontId::proportional(8.0),
-                Color32::WHITE,
+                egui::FontId::proportional(10.0),
+                text_color,
             );
 
             current_offset += width + tag_gap;
@@ -2919,10 +3315,8 @@ fn draw_frame_tags(
             let start_offset = -row_width / 2.0;
             let mut current_offset = start_offset;
 
-            let row_perp_offset = base_perp_offset
-                + (row_idx as f32 - 0.5)
-                    * row_spacing
-                    * if arrow_idx % 2 == 0 { -1.0 } else { 1.0 };
+            // Stack rows below the line (negative direction)
+            let row_perp_offset = base_perp_offset - (row_idx as f32) * row_spacing;
 
             for (text, color, width) in *row_tags {
                 let along_offset = current_offset + width / 2.0;
@@ -2935,13 +3329,38 @@ fn draw_frame_tags(
                     Vec2::new(*width, tag_height),
                 );
 
-                painter.rect_filled(tag_rect, 2.0, *color);
+                let (bg_color, text_color) = if is_selected {
+                    (*color, Color32::WHITE)
+                } else if has_selection {
+                    (
+                        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40),
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 40),
+                    )
+                } else {
+                    (*color, Color32::WHITE)
+                };
+
+                // Draw shadow for selected tags
+                if is_selected {
+                    let shadow_offset = 2.0;
+                    let shadow_rect = Rect::from_center_size(
+                        Pos2::new(tag_center_x + shadow_offset, tag_center_y + shadow_offset),
+                        Vec2::new(*width, tag_height),
+                    );
+                    painter.rect_filled(
+                        shadow_rect,
+                        2.0,
+                        Color32::from_rgba_unmultiplied(0, 0, 0, 80),
+                    );
+                }
+
+                painter.rect_filled(tag_rect, 2.0, bg_color);
                 painter.text(
                     tag_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     text,
-                    egui::FontId::proportional(8.0),
-                    Color32::WHITE,
+                    egui::FontId::proportional(10.0),
+                    text_color,
                 );
 
                 current_offset += width + tag_gap;
@@ -3012,6 +3431,20 @@ fn draw_time_markers(
             marker_color,
         );
     }
+}
+
+/// Draw text positioned along a line direction
+/// Note: egui doesn't support rotated text, so we keep text horizontal
+/// but position it centered at the given point
+fn draw_rotated_text(
+    painter: &Painter,
+    center: Pos2,
+    _angle: f32, // Reserved for future use if egui adds rotation support
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+) {
+    painter.text(center, egui::Align2::CENTER_CENTER, text, font, color);
 }
 
 fn draw_arrowhead(painter: &Painter, from: Pos2, to: Pos2, color: Color32, size: f32) {
