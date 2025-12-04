@@ -22,9 +22,24 @@ pub enum FrameType {
     RetireConnectionId,
     PathChallenge,
     PathResponse,
+    PathAck,
+    PathAbandon,
+    PathStatusAvailable,
+    PathStatusBackup,
+    PathNewConnectionId,
+    PathRetireConnectionId,
+    PathsBlocked,
+    PathCidsBlocked,
+    MaxPathId,
     ConnectionClose,
     HandshakeDone,
     Datagram,
+    AckFrequency,
+    ImmediateAck,
+    ObservedAddress,
+    AddAddress,
+    ReachOut,
+    RemoveAddress,
     Custom(String),
 }
 
@@ -50,18 +65,37 @@ impl FrameType {
             QuicFrame::RetireConnectionId { .. } => Self::RetireConnectionId,
             QuicFrame::PathChallenge { .. } => Self::PathChallenge,
             QuicFrame::PathResponse { .. } => Self::PathResponse,
+            QuicFrame::PathAck { .. } => Self::PathAck,
+            QuicFrame::PathAbandon { .. } => Self::PathAbandon,
+            QuicFrame::PathStatusAvailable { .. } => Self::PathStatusAvailable,
+            QuicFrame::PathStatusBackup { .. } => Self::PathStatusBackup,
+            QuicFrame::PathNewConnectionId { .. } => Self::PathNewConnectionId,
+            QuicFrame::PathRetireConnectionId { .. } => Self::PathRetireConnectionId,
+            QuicFrame::PathsBlocked { .. } => Self::PathsBlocked,
+            QuicFrame::PathCidsBlocked { .. } => Self::PathCidsBlocked,
+            QuicFrame::MaxPathId { .. } => Self::MaxPathId,
             QuicFrame::ConnectionClose { .. } => Self::ConnectionClose,
-            QuicFrame::HandshakeDone => Self::HandshakeDone,
+            QuicFrame::HandshakeDone { .. } => Self::HandshakeDone,
             QuicFrame::Datagram { .. } => Self::Datagram,
+            QuicFrame::AckFrequency { .. } => Self::AckFrequency,
+            QuicFrame::ImmediateAck { .. } => Self::ImmediateAck,
+            QuicFrame::ObservedAddress { .. } => Self::ObservedAddress,
+            QuicFrame::AddAddress { .. } => Self::AddAddress,
+            QuicFrame::ReachOut { .. } => Self::ReachOut,
+            QuicFrame::RemoveAddress { .. } => Self::RemoveAddress,
             QuicFrame::Unknown {
-                raw_frame_type,
+                frame_type_bytes,
                 raw,
                 ..
             } => {
                 let name = raw
                     .as_ref()
                     .and_then(|r| r.data.clone())
-                    .unwrap_or_else(|| format!("0x{:X}", raw_frame_type));
+                    .unwrap_or_else(|| {
+                        frame_type_bytes
+                            .map(|ftb| format!("0x{:X}", ftb))
+                            .unwrap_or_else(|| "Unknown".to_string())
+                    });
                 Self::Custom(name)
             }
         }
@@ -88,9 +122,24 @@ impl FrameType {
             Self::RetireConnectionId => "RETIRE_CONNECTION_ID".to_string(),
             Self::PathChallenge => "PATH_CHALLENGE".to_string(),
             Self::PathResponse => "PATH_RESPONSE".to_string(),
+            Self::PathAck => "PATH_ACK".to_string(),
+            Self::PathAbandon => "PATH_ABANDON".to_string(),
+            Self::PathStatusAvailable => "PATH_STATUS_AVAILABLE".to_string(),
+            Self::PathStatusBackup => "PATH_STATUS_BACKUP".to_string(),
+            Self::PathNewConnectionId => "PATH_NEW_CONNECTION_ID".to_string(),
+            Self::PathRetireConnectionId => "PATH_RETIRE_CONNECTION_ID".to_string(),
+            Self::PathsBlocked => "PATHS_BLOCKED".to_string(),
+            Self::PathCidsBlocked => "PATH_CIDS_BLOCKED".to_string(),
+            Self::MaxPathId => "MAX_PATH_ID".to_string(),
             Self::ConnectionClose => "CONNECTION_CLOSE".to_string(),
             Self::HandshakeDone => "HANDSHAKE_DONE".to_string(),
             Self::Datagram => "DATAGRAM".to_string(),
+            Self::AckFrequency => "ACK_FREQUENCY".to_string(),
+            Self::ImmediateAck => "IMMEDIATE_ACK".to_string(),
+            Self::ObservedAddress => "OBSERVED_ADDRESS".to_string(),
+            Self::AddAddress => "ADD_ADDRESS".to_string(),
+            Self::ReachOut => "REACH_OUT".to_string(),
+            Self::RemoveAddress => "REMOVE_ADDRESS".to_string(),
             Self::Custom(name) => name.to_uppercase(),
         }
     }
@@ -114,9 +163,24 @@ impl FrameType {
             Self::RetireConnectionId => "RCI".to_string(),
             Self::PathChallenge => "PCH".to_string(),
             Self::PathResponse => "PRS".to_string(),
+            Self::PathAck => "PAK".to_string(),
+            Self::PathAbandon => "PAB".to_string(),
+            Self::PathStatusAvailable => "PSA".to_string(),
+            Self::PathStatusBackup => "PSB".to_string(),
+            Self::PathNewConnectionId => "PNC".to_string(),
+            Self::PathRetireConnectionId => "PRC".to_string(),
+            Self::PathsBlocked => "PBK".to_string(),
+            Self::PathCidsBlocked => "PCB".to_string(),
+            Self::MaxPathId => "MPI".to_string(),
             Self::ConnectionClose => "CLS".to_string(),
             Self::HandshakeDone => "HSD".to_string(),
             Self::Datagram => "DGM".to_string(),
+            Self::AckFrequency => "ACF".to_string(),
+            Self::ImmediateAck => "IAC".to_string(),
+            Self::ObservedAddress => "OAD".to_string(),
+            Self::AddAddress => "AAD".to_string(),
+            Self::ReachOut => "ROU".to_string(),
+            Self::RemoveAddress => "RAD".to_string(),
             Self::Custom(name) => derive_short_name(name),
         }
     }
@@ -124,17 +188,43 @@ impl FrameType {
     /// Color for rendering this frame type.
     pub fn color(&self) -> Color32 {
         match self {
-            Self::Stream(_) => Color32::from_rgb(255, 80, 80),
-            Self::Crypto => Color32::from_rgb(128, 0, 128),
-            Self::Ack => Color32::from_rgb(0, 128, 0),
-            Self::Padding => Color32::from_rgb(255, 165, 0),
+            Self::Stream(_) => Color32::from_rgb(255, 80, 80), // Red
+            Self::Crypto => Color32::from_rgb(128, 0, 128),    // Purple
+            Self::Ack | Self::ImmediateAck => Color32::from_rgb(0, 128, 0), // Green
+            Self::Padding => Color32::from_rgb(255, 165, 0),   // Orange
+            Self::Ping => Color32::from_rgb(0, 191, 255),      // Deep sky blue
+            Self::ResetStream => Color32::from_rgb(220, 20, 60), // Crimson
+            Self::StopSending => Color32::from_rgb(178, 34, 34), // Firebrick
+            Self::NewToken => Color32::from_rgb(255, 215, 0),  // Gold
             Self::MaxData | Self::MaxStreamData | Self::MaxStreams => {
-                Color32::from_rgb(100, 150, 200)
+                Color32::from_rgb(100, 150, 200) // Steel blue
             }
-            Self::HandshakeDone => Color32::from_rgb(50, 150, 50),
-            Self::NewConnectionId | Self::RetireConnectionId => Color32::from_rgb(200, 100, 50),
-            Self::ConnectionClose => Color32::from_rgb(255, 100, 100),
-            _ => Color32::from_rgb(100, 100, 100),
+            Self::DataBlocked | Self::StreamDataBlocked | Self::StreamsBlocked => {
+                Color32::from_rgb(255, 99, 71) // Tomato
+            }
+            Self::HandshakeDone => Color32::from_rgb(50, 150, 50), // Forest green
+            Self::NewConnectionId | Self::RetireConnectionId => Color32::from_rgb(200, 100, 50), // Sienna
+            Self::ConnectionClose => Color32::from_rgb(255, 100, 100), // Light red
+            Self::AckFrequency => Color32::from_rgb(200, 150, 50),     // Dark goldenrod
+            Self::Datagram => Color32::from_rgb(138, 43, 226),         // Blue violet
+            // Path-related frames (multipath)
+            Self::PathChallenge => Color32::from_rgb(70, 130, 180), // Steel blue
+            Self::PathResponse => Color32::from_rgb(60, 179, 113),  // Medium sea green
+            Self::PathAck => Color32::from_rgb(46, 139, 87),        // Sea green
+            Self::PathAbandon => Color32::from_rgb(199, 21, 133),   // Medium violet red
+            Self::PathStatusAvailable => Color32::from_rgb(32, 178, 170), // Light sea green
+            Self::PathStatusBackup => Color32::from_rgb(0, 139, 139), // Dark cyan
+            Self::PathNewConnectionId => Color32::from_rgb(255, 140, 0), // Dark orange
+            Self::PathRetireConnectionId => Color32::from_rgb(210, 105, 30), // Chocolate
+            Self::PathsBlocked => Color32::from_rgb(219, 112, 147), // Pale violet red
+            Self::PathCidsBlocked => Color32::from_rgb(176, 48, 96), // Maroon
+            Self::MaxPathId => Color32::from_rgb(72, 61, 139),      // Dark slate blue
+            // Address-related frames
+            Self::ObservedAddress => Color32::from_rgb(200, 0, 50), // Dark red
+            Self::AddAddress | Self::RemoveAddress | Self::ReachOut => {
+                Color32::from_rgb(200, 50, 50) // Indian red
+            }
+            Self::Custom(_) => Color32::from_rgb(147, 112, 219), // Medium purple
         }
     }
 
@@ -246,9 +336,9 @@ pub fn get_frame_stream_id(frame: &QuicFrame) -> Option<u64> {
 /// Get frame size from a QUIC frame if applicable.
 pub fn get_frame_size(frame: &QuicFrame) -> Option<u64> {
     match frame {
-        QuicFrame::Stream { length, .. }
-        | QuicFrame::Crypto { length, .. }
-        | QuicFrame::Datagram { length, .. } => Some(*length),
+        QuicFrame::Stream { raw, .. }
+        | QuicFrame::Crypto { raw, .. }
+        | QuicFrame::Datagram { raw, .. } => raw.as_ref().and_then(|r| r.length),
         _ => None,
     }
 }

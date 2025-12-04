@@ -17,6 +17,7 @@ pub struct CongestionGraph {
     show_congestion_states: bool,
     show_time_gaps: bool,
     time_gap_threshold_ms: f32,
+    selected_path_id: u64,
 }
 
 impl CongestionGraph {
@@ -33,6 +34,7 @@ impl CongestionGraph {
             show_congestion_states: true,
             show_time_gaps: false,
             time_gap_threshold_ms: 50.0,
+            selected_path_id: 0,
         }
     }
 
@@ -42,11 +44,39 @@ impl CongestionGraph {
         qlog_data: &QlogData,
         correlation: &PacketCorrelation,
     ) {
+        // Collect all unique path IDs
+        let available_path_ids = Self::collect_path_ids(qlog_data);
+
+        // Ensure selected_path_id is valid, default to first available
+        if !available_path_ids.contains(&self.selected_path_id) {
+            self.selected_path_id = *available_path_ids.first().unwrap_or(&0);
+        }
+
         ui.horizontal(|ui| {
             ui.heading("Congestion Graph");
             ui.separator();
+
+            // Path ID selector
+            if available_path_ids.len() > 1 {
+                ui.label("Path:");
+                egui::ComboBox::from_id_salt("path_id_selector")
+                    .selected_text(format!("Path {}", self.selected_path_id))
+                    .show_ui(ui, |ui| {
+                        for &path_id in &available_path_ids {
+                            ui.selectable_value(
+                                &mut self.selected_path_id,
+                                path_id,
+                                format!("Path {}", path_id),
+                            );
+                        }
+                    });
+                ui.separator();
+            }
+
             if ui.button("Reset Toggles").clicked() {
+                let current_path = self.selected_path_id;
                 *self = Self::new();
+                self.selected_path_id = current_path;
             }
         });
 
@@ -70,7 +100,7 @@ impl CongestionGraph {
         });
         ui.separator();
 
-        let metrics = self.extract_metrics(qlog_data);
+        let metrics = self.extract_metrics(qlog_data, self.selected_path_id);
 
         let congestion_plot = Plot::new("congestion_data_plot")
             .legend(egui_plot::Legend::default().position(egui_plot::Corner::LeftTop))
@@ -229,7 +259,32 @@ impl CongestionGraph {
         ));
     }
 
-    fn extract_metrics(&self, qlog_data: &QlogData) -> MetricsData {
+    fn collect_path_ids(qlog_data: &QlogData) -> Vec<u64> {
+        use std::collections::BTreeSet;
+
+        let mut path_ids = BTreeSet::new();
+
+        for event in qlog_data.events.iter() {
+            let path_id = match &event.data {
+                EventData::PacketSent(data) => data.header.path_id,
+                EventData::PacketReceived(data) => data.header.path_id,
+                EventData::PacketLost(data) => data.header.as_ref().and_then(|h| h.path_id),
+                EventData::MetricsUpdated(data) => data.path_id,
+                _ => None,
+            };
+
+            if let Some(pid) = path_id {
+                path_ids.insert(pid);
+            } else {
+                // If no path_id is present, treat as path 0
+                path_ids.insert(0);
+            }
+        }
+
+        path_ids.into_iter().collect()
+    }
+
+    fn extract_metrics(&self, qlog_data: &QlogData, path_id: u64) -> MetricsData {
         let mut cwnd_points = Vec::new();
         let mut bytes_in_flight_points = Vec::new();
         let mut smoothed_rtt_points = Vec::new();
@@ -248,6 +303,22 @@ impl CongestionGraph {
 
         for event in qlog_data.events.iter() {
             let time = event.time as f64;
+
+            // Filter by path_id
+            let event_path_id = match &event.data {
+                EventData::PacketSent(data) => data.header.path_id.unwrap_or(0),
+                EventData::PacketReceived(data) => data.header.path_id.unwrap_or(0),
+                EventData::PacketLost(data) => {
+                    data.header.as_ref().and_then(|h| h.path_id).unwrap_or(0)
+                }
+                EventData::MetricsUpdated(data) => data.path_id.unwrap_or(0),
+                _ => continue,
+            };
+
+            // Skip events from different paths
+            if event_path_id != path_id {
+                continue;
+            }
 
             match &event.data {
                 EventData::MetricsUpdated(data) => {

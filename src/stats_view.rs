@@ -90,13 +90,14 @@ impl ConnectionStats {
                     if let Some(ref frames) = data.frames {
                         for frame in frames {
                             if let qlog::events::quic::QuicFrame::Stream {
-                                stream_id, length, ..
+                                stream_id, raw, ..
                             } = frame
                             {
+                                let length = raw.as_ref().and_then(|r| r.length).unwrap_or(0);
                                 let stream_stats =
                                     stats.stream_stats.entry(*stream_id).or_default();
                                 stream_stats.frames_sent += 1;
-                                stream_stats.bytes_sent += *length;
+                                stream_stats.bytes_sent += length;
                             }
                         }
                     }
@@ -120,13 +121,14 @@ impl ConnectionStats {
                     if let Some(ref frames) = data.frames {
                         for frame in frames {
                             if let qlog::events::quic::QuicFrame::Stream {
-                                stream_id, length, ..
+                                stream_id, raw, ..
                             } = frame
                             {
+                                let length = raw.as_ref().and_then(|r| r.length).unwrap_or(0);
                                 let stream_stats =
                                     stats.stream_stats.entry(*stream_id).or_default();
                                 stream_stats.frames_received += 1;
-                                stream_stats.bytes_received += *length;
+                                stream_stats.bytes_received += length;
                             }
                         }
                     }
@@ -180,8 +182,8 @@ impl ConnectionStats {
     fn estimate_frame_size(frame: &qlog::events::quic::QuicFrame) -> u64 {
         use qlog::events::quic::QuicFrame;
         match frame {
-            QuicFrame::Stream { length, .. } => *length + 3, // frame type + stream id + offset
-            QuicFrame::Crypto { length, .. } => *length + 2,
+            QuicFrame::Stream { raw, .. } => raw.as_ref().and_then(|r| r.length).unwrap_or(0) + 3,
+            QuicFrame::Crypto { raw, .. } => raw.as_ref().and_then(|r| r.length).unwrap_or(0) + 2,
             QuicFrame::Ack { .. } => 20, // Estimate for ACK frame
             QuicFrame::Padding { .. } => 1,
             QuicFrame::Ping { .. } => 1,
@@ -192,7 +194,7 @@ impl ConnectionStats {
             QuicFrame::PathChallenge { .. } => 9,
             QuicFrame::PathResponse { .. } => 9,
             QuicFrame::ConnectionClose { .. } => 20,
-            QuicFrame::HandshakeDone => 1,
+            QuicFrame::HandshakeDone { .. } => 1,
             QuicFrame::MaxData { .. } => 8,
             QuicFrame::MaxStreamData { .. } => 10,
             QuicFrame::MaxStreams { .. } => 8,

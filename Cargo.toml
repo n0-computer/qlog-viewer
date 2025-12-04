@@ -21,7 +21,7 @@ egui_extras = { version = "0.33", features = ["all_loaders"] }
 egui_plot = "0.34"
 
 # qlog parsing
-qlog = "0.15"
+qlog = { package = "n0-qlog", git = "https://github.com/n0-computer/n0-qlog", branch = "main" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sonic-rs = "0.5"
@@ -43,6 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CLI argument parsing
 clap = { version = "4.5", features = ["derive"] }
+convert_case = "0.10.0"
 
 # CI release profile with heavy optimizations for distribution builds
 [profile.ci-release]

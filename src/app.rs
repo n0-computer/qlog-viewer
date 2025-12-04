@@ -5,8 +5,14 @@ use crate::packetization_diagram::PacketizationDiagram;
 use crate::qlog_data::QlogData;
 use crate::sequence_diagram::SequenceDiagram;
 use crate::stats_view::StatsView;
-use crate::utils;
-use egui::{CentralPanel, Context, SidePanel, TopBottomPanel};
+use crate::utils::{self, FrameType};
+use egui::text::LayoutJob;
+use egui::{
+    CentralPanel, CollapsingHeader, Context, FontFamily, FontId, SidePanel, TextFormat,
+    TopBottomPanel,
+};
+use qlog::events::quic::PacketHeader;
+use qlog::events::RawInfo;
 use qlog::events::{quic::QuicFrame, Event, EventData};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -43,6 +49,7 @@ pub struct QlogViewerApp {
     loading: bool,
     error_message: Option<String>,
     selected_event_idx: Option<usize>,
+    recv_selected_event_idx: Option<usize>,
     filter_text: String,
     filter_stream_id: Option<u64>,
     filter_packet_type: Option<String>,
@@ -63,12 +70,13 @@ impl QlogViewerApp {
             loading: false,
             error_message: None,
             selected_event_idx: None,
+            recv_selected_event_idx: None,
             filter_text: String::new(),
             filter_stream_id: None,
             filter_packet_type: None,
             show_event_detail: true,
             view_mode: ViewMode::EventList,
-            sequence_diagram: SequenceDiagram::new(),
+            sequence_diagram: SequenceDiagram::default(),
             congestion_graph: CongestionGraph::new(),
             multiplexing_diagram: MultiplexingDiagram::new(),
             packetization_diagram: PacketizationDiagram::new(),
@@ -295,10 +303,11 @@ impl QlogViewerApp {
                             &self.loaded_files[0],
                             &self.loaded_files[1],
                             &mut self.selected_event_idx,
+                            &mut self.recv_selected_event_idx,
                             &mut self.selected_file_idx,
                         );
                     } else {
-                        self.sequence_diagram.show(
+                        self.sequence_diagram.show_single(
                             ui,
                             data,
                             correlation,
@@ -432,6 +441,35 @@ impl QlogViewerApp {
         let current_selection = *selected_event_idx;
         let mut new_selection = current_selection;
 
+        // Handle arrow key navigation
+        let (up_pressed, down_pressed) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+            )
+        });
+
+        if up_pressed || down_pressed {
+            if let Some(current_idx) = current_selection {
+                // Find the position of the current selection in filtered events
+                if let Some(current_pos) = filtered_events
+                    .iter()
+                    .position(|(idx, _)| *idx == current_idx)
+                {
+                    if up_pressed && current_pos > 0 {
+                        new_selection = Some(filtered_events[current_pos - 1].0);
+                    } else if down_pressed && current_pos + 1 < filtered_events.len() {
+                        new_selection = Some(filtered_events[current_pos + 1].0);
+                    }
+                }
+            } else if !filtered_events.is_empty() {
+                // No selection yet, select first item on down arrow
+                if down_pressed {
+                    new_selection = Some(filtered_events[0].0);
+                }
+            }
+        }
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, 20.0, filtered_events.len(), |ui, row_range| {
@@ -443,15 +481,34 @@ impl QlogViewerApp {
                             if let Some((actual_idx, event)) = filtered_events.get(row_idx) {
                                 let is_selected = current_selection == Some(*actual_idx);
 
-                                let response =
-                                    ui.selectable_label(is_selected, format!("{}", row_idx));
-                                if response.clicked() {
+                                // Make entire row clickable by using horizontal layout with selectable_label
+                                ui.horizontal(|ui| {
+                                    let response =
+                                        ui.selectable_label(is_selected, format!("{}", row_idx));
+                                    if response.clicked() {
+                                        new_selection = Some(*actual_idx);
+                                    }
+                                });
+
+                                // Make each cell clickable
+                                let time_response =
+                                    ui.selectable_label(is_selected, data.format_time(event));
+                                if time_response.clicked() {
                                     new_selection = Some(*actual_idx);
                                 }
 
-                                ui.label(data.format_time(event));
-                                ui.label(data.get_event_name(event));
-                                ui.label(data.get_event_summary(event));
+                                let name_response =
+                                    ui.selectable_label(is_selected, data.get_event_name(event));
+                                if name_response.clicked() {
+                                    new_selection = Some(*actual_idx);
+                                }
+
+                                let summary_response =
+                                    ui.selectable_label(is_selected, data.get_event_summary(event));
+                                if summary_response.clicked() {
+                                    new_selection = Some(*actual_idx);
+                                }
+
                                 ui.end_row();
                             }
                         }
@@ -491,78 +548,159 @@ impl QlogViewerApp {
             .resizable(true)
             .default_width(400.0)
             .show(ctx, |ui| {
-                ui.heading("Event Details");
-                ui.separator();
-
-                if let Some(file) = self.selected_file() {
-                    let data = &file.qlog_data;
-                    if let Some(idx) = self.selected_event_idx {
-                        if let Some(event) = data.events.get(idx) {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                ui.label(format!("Event #{}", idx));
-                                ui.label(format!("Time: {}", data.format_time(event)));
-                                ui.label(format!("Name: {}", data.get_event_name(event)));
-
-                                // Check if this is a lost packet in dual-file mode
-                                if self.view_mode == ViewMode::SequenceDiagram
-                                    && self.loaded_files.len() >= 2
-                                {
-                                    if let EventData::PacketSent(sent_data) = &event.data {
-                                        if let Some(pn) = sent_data.header.packet_number {
-                                            // Check if received in the other file
-                                            let other_file_idx =
-                                                if self.selected_file_idx == 0 { 1 } else { 0 };
-                                            if let Some(other_file) =
-                                                self.loaded_files.get(other_file_idx)
-                                            {
-                                                let received =
-                                                    other_file.qlog_data.events.iter().any(|e| {
-                                                        if let EventData::PacketReceived(recv) =
-                                                            &e.data
-                                                        {
-                                                            recv.header.packet_number == Some(pn)
-                                                        } else {
-                                                            false
-                                                        }
-                                                    });
-                                                if !received {
-                                                    ui.horizontal(|ui| {
-                                                        ui.label(
-                                                            egui::RichText::new("⚠ LOST")
-                                                                .color(egui::Color32::RED)
-                                                                .strong(),
-                                                        );
-                                                        ui.label(
-                                                            "(not received by other endpoint)",
-                                                        );
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                ui.separator();
-
-                                ui.label("Raw JSON:");
-                                let json_str = serde_json::to_string_pretty(&event)
-                                    .unwrap_or_else(|_| "Failed to serialize".to_string());
-                                egui::ScrollArea::vertical().show(ui, |ui| {
-                                    ui.add(
-                                        egui::TextEdit::multiline(&mut json_str.as_str())
-                                            .font(egui::TextStyle::Monospace)
-                                            .desired_width(f32::INFINITY),
-                                    );
-                                });
-                            });
-                        }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    // In dual-file mode, show both sent and received events
+                    if self.view_mode == ViewMode::SequenceDiagram && self.loaded_files.len() >= 2 {
+                        self.render_dual_event_detail(ui);
                     } else {
-                        ui.label("Select an event to view details");
+                        // Single file mode - show only one event
+                        let mut event_data = None;
+                        if let Some(file) = self.selected_file() {
+                            let data = &file.qlog_data;
+                            if let Some(idx) = self.selected_event_idx {
+                                if let Some(event) = data.events.get(idx) {
+                                    event_data = Some((idx, event, data));
+                                }
+                            }
+                        }
+
+                        let Some((idx, event, data)) = event_data else {
+                            ui.heading("Select event to show details");
+                            return;
+                        };
+
+                        self.render_single_event(ui, idx, event, data, "single");
                     }
-                } else {
-                    ui.label("No data loaded");
-                }
+                });
             });
+    }
+
+    fn render_single_event(
+        &self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        event: &Event,
+        data: &QlogData,
+        id_prefix: &str,
+    ) {
+        ui.heading(format!("Event #{} - {}", idx, data.get_event_name(event)));
+        render_header(ui, &event.data);
+
+        ui.separator();
+
+        ui.label(format!("Time: {}", data.format_time(event)));
+
+        if !event.ex_data.is_empty() {
+            for (key, value) in &event.ex_data {
+                ui.label(format!("[EX] {key}: {value}"));
+            }
+        }
+
+        // Render transport parameters for ParametersSet events
+        if let EventData::ParametersSet(ref params) = event.data {
+            ui.add_space(5.);
+            ui.separator();
+            ui.add_space(5.);
+            render_transport_parameters(ui, params, id_prefix, idx);
+        }
+
+        if event.data.contains_quic_frames().is_some() {
+            ui.add_space(5.);
+            ui.separator();
+            ui.add_space(5.);
+            ui.heading("Frames");
+            match event.data {
+                EventData::PacketSent(ref pkt) => {
+                    if let Some(ref frames) = pkt.frames {
+                        for (i, frame) in frames.iter().enumerate() {
+                            render_frame_with_prefix(ui, id_prefix, idx, i, frame);
+                        }
+                    }
+                }
+                EventData::PacketReceived(ref pkt) => {
+                    if let Some(ref frames) = pkt.frames {
+                        for (i, frame) in frames.iter().enumerate() {
+                            render_frame_with_prefix(ui, id_prefix, idx, i, frame);
+                        }
+                    }
+                }
+                EventData::PacketLost(ref pkt) => {
+                    if let Some(ref frames) = pkt.frames {
+                        for (i, frame) in frames.iter().enumerate() {
+                            render_frame_with_prefix(ui, id_prefix, idx, i, frame);
+                        }
+                    }
+                }
+                EventData::MarkedForRetransmit(ref ev) => {
+                    for (i, frame) in ev.frames.iter().enumerate() {
+                        render_frame_with_prefix(ui, id_prefix, idx, i, frame);
+                    }
+                }
+                EventData::FramesProcessed(ref ev) => {
+                    for (i, frame) in ev.frames.iter().enumerate() {
+                        render_frame_with_prefix(ui, id_prefix, idx, i, frame);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        CollapsingHeader::new("Raw JSON")
+            .id_salt(format!("{}-raw-json-{}", id_prefix, idx))
+            .show(ui, |ui| {
+                let s = serde_json::to_string_pretty(&event).unwrap();
+                ui.label(s);
+            });
+    }
+
+    fn render_dual_event_detail(&self, ui: &mut egui::Ui) {
+        let sent_idx = self.selected_event_idx;
+        let recv_idx = self.recv_selected_event_idx;
+
+        if sent_idx.is_none() {
+            ui.heading("Select an arrow to show event details");
+            return;
+        }
+
+        let sent_file_idx = self.selected_file_idx;
+        let recv_file_idx = if sent_file_idx == 0 { 1 } else { 0 };
+
+        // Show sent event
+        if let Some(idx) = sent_idx {
+            if let Some(sent_file) = self.loaded_files.get(sent_file_idx) {
+                if let Some(event) = sent_file.qlog_data.events.get(idx) {
+                    ui.heading(
+                        egui::RichText::new(format!("📤 SENT Event #{}", idx))
+                            .color(egui::Color32::from_rgb(100, 150, 255)),
+                    );
+                    ui.label(format!("File: {}", sent_file.label));
+                    ui.separator();
+                    self.render_single_event(ui, idx, event, &sent_file.qlog_data, "sent");
+                }
+            }
+        }
+
+        ui.add_space(20.);
+        ui.separator();
+        ui.add_space(10.);
+
+        // Show received event
+        if let Some(idx) = recv_idx {
+            if let Some(recv_file) = self.loaded_files.get(recv_file_idx) {
+                if let Some(event) = recv_file.qlog_data.events.get(idx) {
+                    ui.heading(
+                        egui::RichText::new(format!("📥 RECEIVED Event #{}", idx))
+                            .color(egui::Color32::from_rgb(100, 255, 150)),
+                    );
+                    ui.label(format!("File: {}", recv_file.label));
+                    ui.separator();
+                    self.render_single_event(ui, idx, event, &recv_file.qlog_data, "recv");
+                }
+            }
+        } else {
+            ui.heading(egui::RichText::new("❌ PACKET LOST").color(egui::Color32::RED));
+            ui.label("This packet was sent but never received by the other endpoint");
+        }
     }
 
     fn get_event_stream_id(event: &Event) -> Option<u64> {
@@ -688,8 +826,955 @@ impl QlogViewerApp {
 
 impl eframe::App for QlogViewerApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Handle number key shortcuts for view switching
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Num1) {
+                self.view_mode = ViewMode::EventList;
+            } else if i.key_pressed(egui::Key::Num2) {
+                self.view_mode = ViewMode::SequenceDiagram;
+            } else if i.key_pressed(egui::Key::Num3) {
+                self.view_mode = ViewMode::CongestionGraph;
+            } else if i.key_pressed(egui::Key::Num4) {
+                self.view_mode = ViewMode::PacketizationDiagram;
+            } else if i.key_pressed(egui::Key::Num5) {
+                self.view_mode = ViewMode::StatsView;
+            }
+        });
+
         self.render_menu_bar(ctx);
         self.render_event_detail(ctx);
         self.render_main_content(ctx);
+    }
+}
+
+fn render_frame_with_prefix(
+    ui: &mut egui::Ui,
+    prefix: &str,
+    event_id: usize,
+    frame_id: usize,
+    frame: &QuicFrame,
+) {
+    use QuicFrame::*;
+
+    let ty = FrameType::from_quic_frame(frame);
+    let mut heading = LayoutJob::default();
+    heading.append(
+        &format!("[{}]", ty.short_name()),
+        0.,
+        TextFormat {
+            color: ty.color(),
+            font_id: FontId::new(16.0, FontFamily::Proportional),
+            ..Default::default()
+        },
+    );
+    heading.append(
+        &ty.display_name(),
+        1.,
+        TextFormat {
+            font_id: FontId::new(16.0, FontFamily::Proportional),
+            ..Default::default()
+        },
+    );
+
+    CollapsingHeader::new(heading)
+        .id_salt(format!(
+            "{}-frame-{event_id}-{frame_id}-{}",
+            prefix,
+            ty.short_name()
+        ))
+        .show(ui, |ui| {
+            egui::Grid::new(format!(
+                "{}-frame-{event_id}-{frame_id}-{}",
+                prefix,
+                ty.short_name()
+            ))
+            .num_columns(2)
+            .spacing([40.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| match frame {
+                Padding { raw } => {
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                Ping { raw } => {
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                Ack {
+                    ack_delay,
+                    acked_ranges,
+                    ect1,
+                    ect0,
+                    ce,
+                    raw,
+                } => {
+                    if let Some(ack_delay) = ack_delay {
+                        ui.label("Ack Delay");
+                        ui.label(format!("{ack_delay:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(acked_ranges) = acked_ranges {
+                        ui.label("Acked Ranges");
+                        ui.label(format!("{acked_ranges:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(ect0) = ect0 {
+                        ui.label("ECT 0");
+                        ui.label(format!("{ect0:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(ect1) = ect1 {
+                        ui.label("ECT 1");
+                        ui.label(format!("{ect1:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(ce) = ce {
+                        ui.label("CE");
+                        ui.label(format!("{ce:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                ResetStream {
+                    stream_id,
+                    error,
+                    error_code,
+                    final_size,
+                    raw,
+                } => {
+                    ui.label("Stream Id");
+                    ui.label(format!("{stream_id}"));
+                    ui.end_row();
+                    ui.label("Error");
+                    ui.label(format!("{error:?}"));
+                    ui.end_row();
+                    if let Some(code) = error_code {
+                        ui.label("Error Code");
+                        ui.label(format!("{code}"));
+                        ui.end_row();
+                    }
+                    ui.label("Final Size");
+                    ui.label(format!("{final_size}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                StopSending {
+                    stream_id,
+                    error,
+                    error_code,
+                    raw,
+                } => {
+                    ui.label("Stream Id");
+                    ui.label(format!("{stream_id}"));
+                    ui.end_row();
+                    ui.label("Error");
+                    ui.label(format!("{error:?}"));
+                    ui.end_row();
+                    if let Some(code) = error_code {
+                        ui.label("Error Code");
+                        ui.label(format!("{code}"));
+                        ui.end_row();
+                    }
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                Crypto { offset, raw } => {
+                    ui.label("Offset");
+                    ui.label(format!("{offset}"));
+                    ui.end_row();
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                NewToken { token, raw } => {
+                    if let Some(ref ty) = token.ty {
+                        ui.label("Token Type");
+                        ui.label(format!("{ty:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(ref details) = token.details {
+                        ui.label("Token Details");
+                        ui.label(details);
+                        ui.end_row();
+                    }
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                Stream {
+                    stream_id,
+                    offset,
+                    fin,
+                    raw,
+                } => {
+                    ui.label("Stream Id");
+                    ui.label(format!("{stream_id}"));
+                    ui.end_row();
+                    if let Some(offset) = offset {
+                        ui.label("Offset");
+                        ui.label(format!("{offset}"));
+                        ui.end_row();
+                    }
+                    if let Some(fin) = fin {
+                        ui.label("Fin");
+                        ui.label(format!("{fin}"));
+                        ui.end_row();
+                    }
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                MaxData { maximum, raw } => {
+                    ui.label("Maximum");
+                    ui.label(format!("{maximum}"));
+                    ui.end_row();
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                MaxStreamData {
+                    stream_id,
+                    maximum,
+                    raw,
+                } => {
+                    ui.label("Stream Id");
+                    ui.label(format!("{stream_id}"));
+                    ui.end_row();
+                    ui.label("Maximum");
+                    ui.label(format!("{maximum}"));
+                    ui.end_row();
+                    ui.label("Max Stream Data");
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                MaxStreams {
+                    stream_type,
+                    maximum,
+                    raw,
+                } => {
+                    ui.label("Stream Type");
+                    ui.label(format!("{stream_type:?}"));
+                    ui.end_row();
+                    ui.label("Maximum");
+                    ui.label(format!("{maximum}"));
+                    ui.end_row();
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                DataBlocked { limit, raw } => {
+                    ui.label("Limit");
+                    ui.label(format!("{limit}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                StreamDataBlocked {
+                    stream_id,
+                    limit,
+                    raw,
+                } => {
+                    ui.label("Stream Id");
+                    ui.label(format!("{stream_id}"));
+                    ui.end_row();
+
+                    ui.label("Limit");
+                    ui.label(format!("{limit}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                StreamsBlocked {
+                    stream_type,
+                    limit,
+                    raw,
+                } => {
+                    ui.label("Stream Type");
+                    ui.label(format!("{stream_type:?}"));
+                    ui.end_row();
+
+                    ui.label("Limit");
+                    ui.label(format!("{limit}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                NewConnectionId {
+                    sequence_number,
+                    retire_prior_to,
+                    connection_id_length,
+                    connection_id,
+                    stateless_reset_token,
+                    raw,
+                } => {
+                    ui.label("Connection Id");
+                    ui.label(connection_id);
+                    ui.end_row();
+
+                    ui.label("Seq Number");
+                    ui.label(format!("{sequence_number}"));
+                    ui.end_row();
+                    ui.label("Retire Prior To");
+                    ui.label(format!("{retire_prior_to}"));
+                    ui.end_row();
+                    if let Some(len) = connection_id_length {
+                        ui.label("Connection Id Length");
+                        ui.label(format!("{len}"));
+                        ui.end_row();
+                    }
+                    if let Some(token) = stateless_reset_token {
+                        ui.label("Stateless Reset Token");
+                        ui.label(token);
+                        ui.end_row();
+                    }
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                RetireConnectionId {
+                    sequence_number,
+                    raw,
+                } => {
+                    ui.label("Seq Number");
+                    ui.label(format!("{sequence_number}"));
+                    ui.end_row();
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                PathChallenge { data, raw } => {
+                    if let Some(data) = data {
+                        ui.label("Data");
+                        ui.label(data);
+                        ui.end_row();
+                    }
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                PathResponse { data, raw } => {
+                    if let Some(data) = data {
+                        ui.label("Data");
+                        ui.label(data);
+                        ui.end_row();
+                    }
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                ConnectionClose {
+                    error_space,
+                    error,
+                    error_code,
+                    reason,
+                    reason_bytes,
+
+                    trigger_frame_type,
+                } => {
+                    if let Some(error) = error {
+                        ui.label("Error");
+                        ui.label(format!("{error:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(error) = error_code {
+                        ui.label("Error Code");
+                        ui.label(format!("{error:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(error) = error_space {
+                        ui.label("Error Space");
+                        ui.label(format!("{error:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(reason) = reason {
+                        ui.label("Reason");
+                        ui.label(reason);
+                        ui.end_row();
+                    }
+                    if let Some(reason) = reason_bytes {
+                        ui.label("Reason Bytes");
+                        ui.label(reason);
+                        ui.end_row();
+                    }
+                    if let Some(ty) = trigger_frame_type {
+                        ui.label("Trigger Frame Type");
+                        ui.label(format!("{ty}"));
+                        ui.end_row();
+                    }
+                }
+
+                HandshakeDone { raw } => {
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+
+                Datagram { raw } => {
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+
+                PathAck {
+                    path_id,
+                    ack_delay,
+                    acked_ranges,
+
+                    ect1,
+                    ect0,
+                    ce,
+
+                    raw,
+                } => {
+                    ui.label("Path Id");
+                    ui.label(format!("{path_id}"));
+                    ui.end_row();
+
+                    if let Some(delay) = ack_delay {
+                        ui.label("Ack Delay");
+                        ui.label(format!("{delay}"));
+                        ui.end_row();
+                    }
+
+                    if let Some(ranges) = acked_ranges {
+                        ui.label("Acked Ranges");
+                        ui.label(format!("{ranges:?}"));
+                        ui.end_row();
+                    }
+
+                    if let Some(ect0) = ect0 {
+                        ui.label("ECT 0");
+                        ui.label(format!("{ect0:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(ect1) = ect1 {
+                        ui.label("ECT 1");
+                        ui.label(format!("{ect1:?}"));
+                        ui.end_row();
+                    }
+                    if let Some(ce) = ce {
+                        ui.label("CE");
+                        ui.label(format!("{ce:?}"));
+                        ui.end_row();
+                    }
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                PathAbandon {
+                    path_id,
+                    error_code,
+                    raw,
+                } => {
+                    ui.label("Path Id");
+                    ui.label(format!("{path_id}"));
+                    ui.end_row();
+
+                    ui.label("Error Code");
+                    ui.label(format!("{error_code}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+
+                PathStatusAvailable {
+                    path_id,
+                    path_status_sequence_number,
+                    raw,
+                } => {
+                    ui.label("Path Id");
+                    ui.label(format!("{path_id}"));
+                    ui.end_row();
+
+                    ui.label("Path Status Seq Number");
+                    ui.label(format!("{path_status_sequence_number}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+
+                PathStatusBackup {
+                    path_id,
+                    path_status_sequence_number,
+                    raw,
+                } => {
+                    ui.label("Path Id");
+                    ui.label(format!("{path_id}"));
+                    ui.end_row();
+
+                    ui.label("Path Status Seq Number");
+                    ui.label(format!("{path_status_sequence_number}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+
+                PathNewConnectionId {
+                    path_id,
+                    sequence_number,
+                    retire_prior_to,
+                    connection_id_length,
+                    connection_id,
+                    stateless_reset_token,
+                    raw,
+                } => {
+                    ui.label("Connection Id");
+                    ui.label(connection_id.to_string());
+                    ui.end_row();
+
+                    ui.label("Path Id");
+                    ui.label(format!("{path_id}"));
+                    ui.end_row();
+
+                    ui.label("Seq Number");
+                    ui.label(format!("{sequence_number}"));
+                    ui.end_row();
+
+                    ui.label("Retire Prior To");
+                    ui.label(format!("{retire_prior_to}"));
+                    ui.end_row();
+
+                    if let Some(len) = connection_id_length {
+                        ui.label("Connection Id Length");
+                        ui.label(format!("{len}"));
+                        ui.end_row();
+                    }
+                    if let Some(token) = stateless_reset_token {
+                        ui.label("Stateless Reset Token");
+                        ui.label(token.to_string());
+                        ui.end_row();
+                    }
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+
+                PathRetireConnectionId {
+                    path_id,
+                    sequence_number,
+                    raw,
+                } => {
+                    ui.label("Path Id");
+                    ui.label(format!("{path_id}"));
+                    ui.end_row();
+
+                    ui.label("Seq Number");
+                    ui.label(format!("{sequence_number}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                MaxPathId {
+                    maximum_path_id,
+                    raw,
+                } => {
+                    ui.label("Maxium Path Id");
+                    ui.label(format!("{maximum_path_id}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                AckFrequency {
+                    sequence_number,
+                    ack_eliciting_threshold,
+                    requested_max_ack_delay,
+                    reordering_threshold,
+                    raw,
+                } => {
+                    ui.label("Seq Number");
+                    ui.label(format!("{sequence_number}"));
+                    ui.end_row();
+                    ui.label("Ack Eliciting Threshold");
+                    ui.label(format!("{ack_eliciting_threshold}"));
+                    ui.end_row();
+                    ui.label("Requested Max Ack Delay");
+                    ui.label(format!("{requested_max_ack_delay}"));
+                    ui.end_row();
+                    ui.label("Reordering Threshold");
+                    ui.label(format!("{reordering_threshold}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                ImmediateAck { raw } => {
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                ObservedAddress {
+                    sequence_number,
+                    ip_v4,
+                    ip_v6,
+                    port,
+                    raw,
+                } => {
+                    ui.label("Seq Number");
+                    ui.label(format!("{sequence_number}"));
+                    ui.end_row();
+                    if let Some(ip) = ip_v4 {
+                        ui.label("IP V4");
+                        ui.label(ip);
+                        ui.end_row();
+                    }
+                    if let Some(ip) = ip_v6 {
+                        ui.label("IP V6");
+                        ui.label(ip);
+                        ui.end_row();
+                    }
+                    ui.label("Port");
+                    ui.label(format!("{port}"));
+                    ui.end_row();
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                AddAddress {
+                    sequence_number,
+                    ip_v4,
+                    ip_v6,
+                    port,
+                } => {
+                    ui.label("Seq Number");
+                    ui.label(format!("{sequence_number}"));
+                    ui.end_row();
+                    if let Some(ip) = ip_v4 {
+                        ui.label("IP V4");
+                        ui.label(ip);
+                        ui.end_row();
+                    }
+                    if let Some(ip) = ip_v6 {
+                        ui.label("IP V6");
+                        ui.label(ip);
+                        ui.end_row();
+                    }
+                    ui.label("Port");
+                    ui.label(format!("{port}"));
+                    ui.end_row();
+                }
+                ReachOut {
+                    round,
+                    ip_v4,
+                    ip_v6,
+                    port,
+                } => {
+                    ui.label("round");
+                    ui.label(format!("{round}"));
+                    ui.end_row();
+                    if let Some(ip) = ip_v4 {
+                        ui.label("IP V4");
+                        ui.label(ip);
+                        ui.end_row();
+                    }
+                    if let Some(ip) = ip_v6 {
+                        ui.label("IP V6");
+                        ui.label(ip);
+                        ui.end_row();
+                    }
+                    ui.label("Port");
+                    ui.label(format!("{port}"));
+                    ui.end_row();
+                }
+                RemoveAddress { sequence_number } => {
+                    ui.label("Seq Number");
+                    ui.label(format!("{sequence_number}"));
+                    ui.end_row();
+                }
+                PathsBlocked {
+                    maximum_path_id,
+                    raw,
+                } => {
+                    ui.label("Maxium Path Id");
+                    ui.label(format!("{maximum_path_id}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                PathCidsBlocked {
+                    path_id,
+                    next_sequence_number,
+                    raw,
+                } => {
+                    ui.label("Path Id");
+                    ui.label(format!("{path_id}"));
+                    ui.end_row();
+
+                    ui.label("Next Seq Number");
+                    ui.label(format!("{next_sequence_number}"));
+                    ui.end_row();
+
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+                Unknown {
+                    frame_type_bytes,
+                    raw,
+                } => {
+                    if let Some(ty) = frame_type_bytes {
+                        ui.label("Frame type");
+                        ui.label(format!("{ty}"));
+                        ui.end_row();
+                    }
+                    if let Some(raw) = raw {
+                        render_raw_info(ui, raw);
+                    }
+                }
+            });
+        });
+    ui.add_space(5.);
+}
+
+fn render_raw_info(ui: &mut egui::Ui, raw: &RawInfo) {
+    if let Some(length) = raw.length {
+        ui.label("Raw Info: Length");
+        ui.label(format!("{length}"));
+        ui.end_row();
+    }
+    if let Some(length) = raw.payload_length {
+        ui.label("Raw Info: Payload Length");
+        ui.label(format!("{length}"));
+        ui.end_row();
+    }
+    if let Some(ref data) = raw.data {
+        ui.label("Raw Info: Data");
+        ui.label(data);
+        ui.end_row();
+    }
+}
+
+fn render_header(ui: &mut egui::Ui, event: &EventData) {
+    match event {
+        EventData::PacketSent(ref data) => {
+            render_inner_header(ui, &data.header);
+        }
+        EventData::PacketReceived(ref data) => {
+            render_inner_header(ui, &data.header);
+        }
+        EventData::PacketDropped(ref data) => {
+            if let Some(ref header) = data.header {
+                render_inner_header(ui, header);
+            }
+        }
+        EventData::PacketBuffered(ref data) => {
+            if let Some(ref header) = data.header {
+                render_inner_header(ui, header);
+            }
+        }
+        EventData::PacketLost(ref data) => {
+            if let Some(ref header) = data.header {
+                render_inner_header(ui, header);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_inner_header(ui: &mut egui::Ui, header: &PacketHeader) {
+    ui.label(format!("Packet Space: {:?}", header.packet_type));
+    if let Some(pn) = header.packet_number {
+        ui.label(format!("Packet Number: {pn}"));
+    }
+    if let Some(pid) = header.path_id {
+        ui.label(format!("Path Id: {pid}"));
+    }
+}
+
+fn render_transport_parameters(
+    ui: &mut egui::Ui,
+    params: &qlog::events::quic::ParametersSet,
+    id_prefix: &str,
+    idx: usize,
+) {
+    ui.heading("Transport Parameters");
+
+    // Initiator
+    if let Some(ref initiator) = params.initiator {
+        ui.label(format!("Initiator: {:?}", initiator));
+    }
+
+    // Connection IDs section
+    CollapsingHeader::new("Connection IDs")
+        .id_salt(format!("{}-params-cids-{}", id_prefix, idx))
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(ref cid) = params.original_destination_connection_id {
+                ui.label(format!("Original DCID: {}", cid));
+            }
+            if let Some(ref cid) = params.initial_source_connection_id {
+                ui.label(format!("Initial SCID: {}", cid));
+            }
+            if let Some(ref cid) = params.retry_source_connection_id {
+                ui.label(format!("Retry SCID: {}", cid));
+            }
+            if let Some(ref token) = params.stateless_reset_token {
+                ui.label(format!("Stateless Reset Token: {}", token));
+            }
+            if let Some(limit) = params.active_connection_id_limit {
+                ui.label(format!("Active CID Limit: {}", limit));
+            }
+        });
+
+    // Flow Control section
+    CollapsingHeader::new("Flow Control")
+        .id_salt(format!("{}-params-flow-{}", id_prefix, idx))
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(v) = params.initial_max_data {
+                ui.label(format!("Initial Max Data: {}", utils::format_bytes(v)));
+            }
+            if let Some(v) = params.initial_max_stream_data_bidi_local {
+                ui.label(format!(
+                    "Max Stream Data (bidi local): {}",
+                    utils::format_bytes(v)
+                ));
+            }
+            if let Some(v) = params.initial_max_stream_data_bidi_remote {
+                ui.label(format!(
+                    "Max Stream Data (bidi remote): {}",
+                    utils::format_bytes(v)
+                ));
+            }
+            if let Some(v) = params.initial_max_stream_data_uni {
+                ui.label(format!("Max Stream Data (uni): {}", utils::format_bytes(v)));
+            }
+            if let Some(v) = params.initial_max_streams_bidi {
+                ui.label(format!("Max Streams (bidi): {}", v));
+            }
+            if let Some(v) = params.initial_max_streams_uni {
+                ui.label(format!("Max Streams (uni): {}", v));
+            }
+        });
+
+    // Timing section
+    CollapsingHeader::new("Timing")
+        .id_salt(format!("{}-params-timing-{}", id_prefix, idx))
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(v) = params.max_idle_timeout {
+                ui.label(format!("Max Idle Timeout: {}ms", v));
+            }
+            if let Some(v) = params.max_ack_delay {
+                ui.label(format!("Max ACK Delay: {}ms", v));
+            }
+            if let Some(v) = params.ack_delay_exponent {
+                ui.label(format!("ACK Delay Exponent: {}", v));
+            }
+            if let Some(v) = params.min_ack_delay {
+                ui.label(format!("Min ACK Delay: {}µs", v));
+            }
+        });
+
+    // Network section
+    CollapsingHeader::new("Network")
+        .id_salt(format!("{}-params-network-{}", id_prefix, idx))
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(v) = params.max_udp_payload_size {
+                ui.label(format!("Max UDP Payload: {} bytes", v));
+            }
+            if let Some(v) = params.max_datagram_frame_size {
+                ui.label(format!("Max Datagram Frame: {} bytes", v));
+            }
+            if let Some(v) = params.disable_active_migration {
+                ui.label(format!("Disable Active Migration: {}", v));
+            }
+            if let Some(ref addr) = params.preferred_address {
+                ui.label(format!("Preferred Address: {:?}", addr));
+            }
+        });
+
+    // Extensions section
+    let has_extensions = params.initial_max_path_id.is_some()
+        || params.max_remote_nat_traversal_addresses.is_some()
+        || params.grease_quic_bit.is_some()
+        || params.address_discovery.is_some();
+
+    if has_extensions {
+        CollapsingHeader::new("Extensions")
+            .id_salt(format!("{}-params-ext-{}", id_prefix, idx))
+            .default_open(true)
+            .show(ui, |ui| {
+                if let Some(v) = params.initial_max_path_id {
+                    ui.label(format!("Initial Max Path ID: {} (Multipath)", v));
+                }
+                if let Some(v) = params.max_remote_nat_traversal_addresses {
+                    ui.label(format!("Max NAT Traversal Addrs: {}", v));
+                }
+                if let Some(v) = params.grease_quic_bit {
+                    ui.label(format!("GREASE QUIC Bit: {}", v));
+                }
+                if let Some(ref role) = params.address_discovery {
+                    ui.label(format!("Address Discovery: {:?}", role));
+                }
+            });
+    }
+
+    // TLS section
+    let has_tls = params.resumption_allowed.is_some()
+        || params.early_data_enabled.is_some()
+        || params.tls_cipher.is_some();
+
+    if has_tls {
+        CollapsingHeader::new("TLS")
+            .id_salt(format!("{}-params-tls-{}", id_prefix, idx))
+            .default_open(false)
+            .show(ui, |ui| {
+                if let Some(v) = params.resumption_allowed {
+                    ui.label(format!("Resumption Allowed: {}", v));
+                }
+                if let Some(v) = params.early_data_enabled {
+                    ui.label(format!("0-RTT Enabled: {}", v));
+                }
+                if let Some(ref cipher) = params.tls_cipher {
+                    ui.label(format!("TLS Cipher: {}", cipher));
+                }
+            });
+    }
+
+    // Unknown parameters
+    if !params.unknown_parameters.is_empty() {
+        CollapsingHeader::new("Unknown Parameters")
+            .id_salt(format!("{}-params-unknown-{}", id_prefix, idx))
+            .default_open(false)
+            .show(ui, |ui| {
+                for param in &params.unknown_parameters {
+                    ui.label(format!("ID 0x{:x}: {}", param.id, param.value));
+                }
+            });
     }
 }

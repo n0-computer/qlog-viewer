@@ -57,8 +57,6 @@ pub struct SentPacketInfo {
 
 #[derive(Debug, Clone)]
 pub struct ReorderEvent {
-    pub earlier_pn: u64,
-    pub later_pn: u64,
     pub earlier_time: f32,
 }
 
@@ -78,8 +76,10 @@ pub struct CongestionPeriod {
 
 #[derive(Debug, Clone, Default)]
 pub struct PacketCorrelation {
-    pub sent_packets: HashMap<u64, SentPacketInfo>,
-    pub lost_packets: HashMap<u64, f32>,
+    // Key: (path_id, packet_type, packet_number)
+    // packet_type is the packet space (Initial, Handshake, 1RTT, etc.)
+    pub sent_packets: HashMap<(u64, String, u64), SentPacketInfo>,
+    pub lost_packets: HashMap<(u64, String, u64), f32>,
     pub reorderings: Vec<ReorderEvent>,
     pub time_gaps: Vec<TimeGap>,
     pub congestion_states: Vec<CongestionPeriod>,
@@ -112,8 +112,10 @@ impl PacketCorrelation {
         for event in qlog.events.iter() {
             if let EventData::PacketSent(data) = &event.data {
                 if let Some(pn) = data.header.packet_number {
+                    let path_id = data.header.path_id.unwrap_or(0);
+                    let packet_type = format!("{:?}", data.header.packet_type);
                     self.sent_packets.insert(
-                        pn,
+                        (path_id, packet_type, pn),
                         SentPacketInfo {
                             time: event.time,
                             ack_time: None,
@@ -130,7 +132,10 @@ impl PacketCorrelation {
             if let EventData::PacketLost(data) = &event.data {
                 if let Some(header) = &data.header {
                     if let Some(pn) = header.packet_number {
-                        self.lost_packets.insert(pn, event.time);
+                        let path_id = header.path_id.unwrap_or(0);
+                        let packet_type = format!("{:?}", header.packet_type);
+                        self.lost_packets
+                            .insert((path_id, packet_type, pn), event.time);
                     }
                 }
             }
@@ -139,14 +144,27 @@ impl PacketCorrelation {
 
     fn correlate_acks(&mut self, qlog: &QlogData) {
         // First try PacketsAcked events (most accurate)
+        // Note: PacketsAcked doesn't include path_id or packet_type, so we try to match against all combinations
         for event in qlog.events.iter() {
             if let EventData::PacketsAcked(data) = &event.data {
                 if let Some(ref packet_numbers) = data.packet_numbers {
                     for &pn in packet_numbers {
-                        if let Some(sent) = self.sent_packets.get_mut(&pn) {
-                            if sent.ack_time.is_none() {
-                                sent.ack_time = Some(event.time);
-                                sent.rtt = Some(event.time - sent.time);
+                        // Try to find this packet in any path and packet space
+                        // Try common packet types first for efficiency
+                        let packet_types = ["OneRtt", "Initial", "Handshake", "ZeroRtt"];
+                        'outer: for packet_type in &packet_types {
+                            for path_id in 0..=255 {
+                                if let Some(sent) = self.sent_packets.get_mut(&(
+                                    path_id,
+                                    packet_type.to_string(),
+                                    pn,
+                                )) {
+                                    if sent.ack_time.is_none() {
+                                        sent.ack_time = Some(event.time);
+                                        sent.rtt = Some(event.time - sent.time);
+                                    }
+                                    break 'outer;
+                                }
                             }
                         }
                     }
@@ -155,11 +173,16 @@ impl PacketCorrelation {
         }
 
         // Also extract ACKs from received packets' ACK frames
+        // In QUIC, ACKs in a packet space acknowledge packets in the same packet space
         for event in &qlog.events {
             let EventData::PacketReceived(data) = &event.data else {
                 continue;
             };
             let Some(frames) = &data.frames else { continue };
+
+            // Get path_id and packet_type from the received packet header
+            let path_id = data.header.path_id.unwrap_or(0);
+            let packet_type = format!("{:?}", data.header.packet_type);
 
             for frame in frames {
                 let QuicFrame::Ack {
@@ -176,7 +199,11 @@ impl PacketCorrelation {
                 };
 
                 for pn in pns {
-                    if let Some(sent) = self.sent_packets.get_mut(&pn) {
+                    // ACK in this packet space acknowledges packets in the same packet space
+                    if let Some(sent) =
+                        self.sent_packets
+                            .get_mut(&(path_id, packet_type.clone(), pn))
+                    {
                         if sent.ack_time.is_none() {
                             sent.ack_time = Some(event.time);
                             sent.rtt = Some(event.time - sent.time);
@@ -188,22 +215,25 @@ impl PacketCorrelation {
     }
 
     fn detect_reorderings(&mut self, qlog: &QlogData) {
-        let mut max_received_pn: u64 = 0;
-        let mut received_times: HashMap<u64, f32> = HashMap::new();
+        // Track max received packet number per (path_id, packet_type)
+        // Packet numbers are independent per packet space (Initial, Handshake, 1-RTT, etc.)
+        let mut max_received_pn_per_path_space: HashMap<(u64, String), u64> = HashMap::new();
 
         for event in qlog.events.iter() {
             if let EventData::PacketReceived(data) = &event.data {
                 if let Some(pn) = data.header.packet_number {
-                    received_times.insert(pn, event.time);
+                    let path_id = data.header.path_id.unwrap_or(0);
+                    let packet_type = format!("{:?}", data.header.packet_type);
+                    let key = (path_id, packet_type.clone());
 
-                    if pn < max_received_pn && self.reorderings.len() < MAX_REORDERINGS {
+                    let max_pn = max_received_pn_per_path_space.entry(key).or_insert(0);
+
+                    if pn < *max_pn && self.reorderings.len() < MAX_REORDERINGS {
                         self.reorderings.push(ReorderEvent {
-                            earlier_pn: pn,
-                            later_pn: max_received_pn,
                             earlier_time: event.time,
                         });
                     }
-                    max_received_pn = max_received_pn.max(pn);
+                    *max_pn = (*max_pn).max(pn);
                 }
             }
         }
@@ -265,29 +295,8 @@ impl PacketCorrelation {
         }
     }
 
-    pub fn is_packet_lost(&self, packet_number: u64) -> bool {
-        self.lost_packets.contains_key(&packet_number)
-    }
-
-    pub fn get_rtt(&self, packet_number: u64) -> Option<f32> {
-        self.sent_packets.get(&packet_number).and_then(|p| p.rtt)
-    }
-
     pub fn loss_count(&self) -> usize {
         self.lost_packets.len()
-    }
-
-    pub fn visible_reorderings(
-        &self,
-        start_time: f32,
-        end_time: f32,
-        max_count: usize,
-    ) -> Vec<&ReorderEvent> {
-        self.reorderings
-            .iter()
-            .filter(|r| r.earlier_time >= start_time && r.earlier_time <= end_time)
-            .take(max_count)
-            .collect()
     }
 
     pub fn visible_time_gaps(&self, start_time: f32, end_time: f32) -> Vec<&TimeGap> {
