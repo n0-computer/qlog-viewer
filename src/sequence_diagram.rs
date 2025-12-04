@@ -4,7 +4,7 @@ use crate::qlog_data::QlogData;
 use crate::utils::{self, FrameType};
 use egui::epaint::Hsva;
 use egui::{Color32, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
-use qlog::events::EventData;
+use qlog::events::{EventData, TupleEndpointInfo};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -66,6 +66,11 @@ pub struct SequenceDiagram {
     last_metrics: Option<LastMetricsState>,
     // Dynamic color assignment for event types
     event_color_map: HashMap<String, Color32>,
+    // Tuple info maps (tuple_id -> TupleInfo) for each file
+    tuple_map_left: HashMap<String, TupleInfo>,
+    tuple_map_right: HashMap<String, TupleInfo>,
+    // Toggle for packet labels visibility
+    pub show_packet_labels: bool,
 }
 
 const GAP_THRESHOLD_MS: f64 = 5.0;
@@ -191,6 +196,61 @@ struct PathLaneLayout {
     use_lanes: bool, // false if too many paths (>4), falls back to color mode
 }
 
+/// Information about a tuple (network path) from TupleAssigned events
+#[derive(Clone, Debug)]
+pub struct TupleInfo {
+    pub tuple_id: String,
+    pub remote_addr: Option<String>, // Formatted as "ip:port"
+    pub local_addr: Option<String>,  // Formatted as "ip:port"
+}
+
+impl TupleInfo {
+    /// Returns a short display string for the remote address
+    #[allow(dead_code)]
+    pub fn remote_display(&self) -> String {
+        self.remote_addr
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Returns true if this appears to be a relayed connection (private IPv6 with port 12345)
+    #[allow(dead_code)]
+    pub fn is_relayed(&self) -> bool {
+        if let Some(ref addr) = self.remote_addr {
+            addr.ends_with(":12345")
+        } else {
+            false
+        }
+    }
+
+    /// Create TupleInfo from a TupleAssigned event
+    pub fn from_tuple_assigned(
+        tuple_id: String,
+        remote: Option<&TupleEndpointInfo>,
+        local: Option<&TupleEndpointInfo>,
+    ) -> Self {
+        Self {
+            tuple_id,
+            remote_addr: remote.and_then(format_endpoint_info),
+            local_addr: local.and_then(format_endpoint_info),
+        }
+    }
+}
+
+/// Format a TupleEndpointInfo into a human-readable address string
+fn format_endpoint_info(info: &TupleEndpointInfo) -> Option<String> {
+    // Prefer IPv4 if available, otherwise use IPv6
+    if let (Some(ip), Some(port)) = (&info.ip_v4, info.port_v4) {
+        Some(format!("{}:{}", ip, port))
+    } else if let (Some(ip), Some(port)) = (&info.ip_v6, info.port_v6) {
+        Some(format!("[{}]:{}", ip, port))
+    } else if let Some(ip) = &info.ip_v4 {
+        Some(ip.clone())
+    } else {
+        info.ip_v6.as_ref().map(|ip| format!("[{}]", ip))
+    }
+}
+
 struct TimeContext<'a> {
     min_time: f64,
     max_time: f64,
@@ -218,6 +278,9 @@ impl Default for SequenceDiagram {
             selected_metrics_event: None,
             last_metrics: None,
             event_color_map: HashMap::new(),
+            tuple_map_left: HashMap::new(),
+            tuple_map_right: HashMap::new(),
+            show_packet_labels: true, // Default: visible
         }
     }
 }
@@ -370,21 +433,25 @@ impl SequenceDiagram {
         ui.horizontal(|ui| {
             ui.heading("Sequence Diagram");
             ui.separator();
-            ui.label("Visualization mode");
-            egui::ComboBox::from_id_salt("visualization_mode")
-                .selected_text(format!("{:?}", self.visualization_mode))
-                .show_ui(ui, |ui| {
-                    for mode in [
-                        VisualizationMode::ColorCoded,
-                        VisualizationMode::VerticalLanes,
-                    ] {
-                        ui.selectable_value(
-                            &mut self.visualization_mode,
-                            mode,
-                            format!("{mode:?}"),
-                        );
-                    }
-                });
+            ui.label("Path mode:");
+            if ui
+                .radio(
+                    self.visualization_mode == VisualizationMode::ColorCoded,
+                    "Color",
+                )
+                .clicked()
+            {
+                self.visualization_mode = VisualizationMode::ColorCoded;
+            }
+            if ui
+                .radio(
+                    self.visualization_mode == VisualizationMode::VerticalLanes,
+                    "Lanes",
+                )
+                .clicked()
+            {
+                self.visualization_mode = VisualizationMode::VerticalLanes;
+            }
         });
     }
 
@@ -394,18 +461,6 @@ impl SequenceDiagram {
         left_path_ids: &[u64],
         right_path_ids: &[u64],
     ) -> PathLaneLayout {
-        let max_paths = left_path_ids.len().max(right_path_ids.len());
-
-        // Fallback to color mode if >4 paths per side
-        if max_paths > 4 {
-            return PathLaneLayout {
-                left_lanes: HashMap::new(),
-                right_lanes: HashMap::new(),
-                center_x: (layout.left_x + layout.right_x) / 2.0,
-                use_lanes: false,
-            };
-        }
-
         let center_x = (layout.left_x + layout.right_x) / 2.0;
 
         let mut left_lanes = HashMap::new();
@@ -667,24 +722,18 @@ impl SequenceDiagram {
     fn render_controls(&mut self, ui: &mut egui::Ui, time_range: f64) {
         let total_loss_count = self.arrows.iter().filter(|a| a.is_lost).count();
 
+        // Row 1: Info, Time Scale, Swap
         ui.horizontal(|ui| {
             ui.label(format!(
-                "{} arrows | 0.00 - {:.2} ms ({:.1}s)",
+                "{} arrows | {:.2}ms",
                 self.arrows.len(),
-                time_range,
-                time_range / 1000.0
+                time_range
             ));
 
             ui.separator();
-            ui.checkbox(&mut self.show_loss_markers, "Show Lost");
-            if self.show_loss_markers && total_loss_count > 0 {
-                ui.label(format!("({} lost)", total_loss_count));
-            }
-
-            ui.separator();
-            ui.label("Time Scale:");
+            ui.label("Scale:");
             ui.add_sized(
-                [350.0, 20.0],
+                [200.0, 18.0],
                 egui::Slider::new(&mut self.dual_time_scale, 0.5..=2500.0)
                     .logarithmic(true)
                     .suffix(" px/ms")
@@ -693,15 +742,22 @@ impl SequenceDiagram {
             );
 
             ui.separator();
-            ui.checkbox(&mut self.compress_gaps, "Compress Gaps");
-
-            ui.separator();
             if ui.button("Swap").clicked() {
                 self.files_swapped = !self.files_swapped;
                 self.rebuild_arrows = true;
             }
+        });
 
-            // Metrics options
+        // Row 2: Checkboxes and metrics options
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.show_loss_markers, "Show Lost");
+            if self.show_loss_markers && total_loss_count > 0 {
+                ui.label(format!("({})", total_loss_count));
+            }
+
+            ui.checkbox(&mut self.compress_gaps, "Compress Gaps");
+            ui.checkbox(&mut self.show_packet_labels, "Show Labels");
+
             ui.separator();
             if ui
                 .checkbox(&mut self.show_metrics_events, "Show Metrics")
@@ -711,7 +767,6 @@ impl SequenceDiagram {
             }
 
             if self.show_metrics_events {
-                ui.separator();
                 if ui
                     .radio(
                         self.metrics_visualization_mode == MetricsVisualizationMode::Events,
@@ -731,18 +786,8 @@ impl SequenceDiagram {
                     self.metrics_visualization_mode = MetricsVisualizationMode::Graphs;
                 }
 
-                // Show the "Overlay" toggle when in Graphs mode
                 if self.metrics_visualization_mode == MetricsVisualizationMode::Graphs {
                     ui.checkbox(&mut self.overlay_graphs, "Overlay");
-                }
-
-                // Show "Show All Metrics Updates" when in Events mode
-                if self.metrics_visualization_mode == MetricsVisualizationMode::Events
-                    && ui
-                        .checkbox(&mut self.show_all_metrics, "Show All Metrics Updates")
-                        .changed()
-                {
-                    self.invalidate_cache();
                 }
             }
         });
@@ -1136,29 +1181,56 @@ impl SequenceDiagram {
                 arrow_idx,
             );
 
-            let info_offset = if arrow.from_left { 5.0 } else { -5.0 };
-            let label = if let Some(pid) = arrow.packet.path_id {
-                format!(
-                    "{}:{} p{}",
-                    arrow.packet.packet_type_short, arrow.packet.packet_number, pid
-                )
-            } else {
-                format!(
-                    "{}:{}",
-                    arrow.packet.packet_type_short, arrow.packet.packet_number
-                )
-            };
-            painter.text(
-                Pos2::new(tag_x + info_offset, tag_y - 10.0),
-                if arrow.from_left {
-                    egui::Align2::LEFT_BOTTOM
+            // Draw packet label if enabled
+            if self.show_packet_labels {
+                let info_offset = if arrow.from_left { 5.0 } else { -5.0 };
+
+                // Build label with packet info and optional tuple remote address
+                let base_label = if let Some(pid) = arrow.packet.path_id {
+                    format!(
+                        "{}:{} p{}",
+                        arrow.packet.packet_type_short, arrow.packet.packet_number, pid
+                    )
                 } else {
-                    egui::Align2::RIGHT_BOTTOM
-                },
-                label,
-                egui::FontId::proportional(8.0),
-                Color32::LIGHT_GRAY,
-            );
+                    format!(
+                        "{}:{}",
+                        arrow.packet.packet_type_short, arrow.packet.packet_number
+                    )
+                };
+
+                // Look up tuple info to get remote address
+                let label = if let Some(tuple_id) = &arrow.packet.tuple_id {
+                    // Use the sending file's tuple map
+                    let tuple_map = if arrow.from_left {
+                        &self.tuple_map_left
+                    } else {
+                        &self.tuple_map_right
+                    };
+                    if let Some(tuple_info) = tuple_map.get(tuple_id) {
+                        if let Some(ref remote) = tuple_info.remote_addr {
+                            format!("{} [{}]", base_label, remote)
+                        } else {
+                            base_label
+                        }
+                    } else {
+                        base_label
+                    }
+                } else {
+                    base_label
+                };
+
+                painter.text(
+                    Pos2::new(tag_x + info_offset, tag_y - 10.0),
+                    if arrow.from_left {
+                        egui::Align2::LEFT_BOTTOM
+                    } else {
+                        egui::Align2::RIGHT_BOTTOM
+                    },
+                    label,
+                    egui::FontId::proportional(10.0),
+                    Color32::LIGHT_GRAY,
+                );
+            }
 
             if is_truncated {
                 draw_loss_marker(painter, Pos2::new(actual_end_x, actual_end_y), 10.0);
@@ -1361,6 +1433,7 @@ impl SequenceDiagram {
                     packet_type_short,
                     packet_number: header.packet_number.unwrap_or(0),
                     path_id,
+                    tuple_id: event.tuple.clone(),
                     frames,
                     event_idx: idx,
                 }))
@@ -1379,8 +1452,33 @@ impl SequenceDiagram {
         if !append {
             self.metrics_events.clear();
             self.last_metrics = None;
+            self.tuple_map_left.clear();
+            self.tuple_map_right.clear();
         }
 
+        // First pass: extract TupleAssigned events to build tuple maps
+        for event in qlog.events.iter() {
+            if let EventData::TupleAssigned(data) = &event.data {
+                let info = TupleInfo::from_tuple_assigned(
+                    data.tuple_id.clone(),
+                    data.tuple_remote.as_ref(),
+                    data.tuple_local.as_ref(),
+                );
+                tracing::debug!(
+                    "TupleAssigned: {} -> remote: {:?}, local: {:?}",
+                    info.tuple_id,
+                    info.remote_addr,
+                    info.local_addr
+                );
+                if file_idx == 0 {
+                    self.tuple_map_left.insert(data.tuple_id.clone(), info);
+                } else {
+                    self.tuple_map_right.insert(data.tuple_id.clone(), info);
+                }
+            }
+        }
+
+        // Second pass: extract metrics events
         for (idx, event) in qlog.events.iter().enumerate() {
             let path_id = Self::extract_path_id(event, None);
 
@@ -3083,6 +3181,7 @@ struct PacketInfo {
     packet_type_short: String,
     packet_number: u64,
     path_id: Option<u64>,
+    tuple_id: Option<String>,
     frames: Vec<FrameType>,
     event_idx: usize,
 }
