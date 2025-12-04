@@ -76,7 +76,7 @@ impl QlogViewerApp {
             filter_packet_type: None,
             show_event_detail: true,
             view_mode: ViewMode::EventList,
-            sequence_diagram: SequenceDiagram::new(),
+            sequence_diagram: SequenceDiagram::default(),
             congestion_graph: CongestionGraph::new(),
             multiplexing_diagram: MultiplexingDiagram::new(),
             packetization_diagram: PacketizationDiagram::new(),
@@ -365,7 +365,7 @@ impl QlogViewerApp {
                             &mut self.selected_file_idx,
                         );
                     } else {
-                        self.sequence_diagram.show(
+                        self.sequence_diagram.show_single(
                             ui,
                             data,
                             correlation,

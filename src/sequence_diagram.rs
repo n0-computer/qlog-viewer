@@ -2,9 +2,12 @@ use crate::app::LoadedFile;
 use crate::packet_correlation::PacketCorrelation;
 use crate::qlog_data::QlogData;
 use crate::utils::{self, FrameType};
+use egui::epaint::Hsva;
 use egui::{Color32, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
 use qlog::events::EventData;
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 const HEADER_HEIGHT: f32 = 40.0;
 const DUAL_LEFT_MARGIN: f32 = 180.0;
@@ -41,35 +44,14 @@ fn path_color(path_id: u64) -> Color32 {
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color32 {
-    let c = v * s;
-    let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
-    let m = v - c;
-
-    let (r, g, b) = if h < 1.0 / 6.0 {
-        (c, x, 0.0)
-    } else if h < 2.0 / 6.0 {
-        (x, c, 0.0)
-    } else if h < 3.0 / 6.0 {
-        (0.0, c, x)
-    } else if h < 4.0 / 6.0 {
-        (0.0, x, c)
-    } else if h < 5.0 / 6.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-
-    Color32::from_rgb(
-        ((r + m) * 255.0) as u8,
-        ((g + m) * 255.0) as u8,
-        ((b + m) * 255.0) as u8,
-    )
+    Hsva::new(h, s, v, 1.0).into()
 }
 
 pub struct SequenceDiagram {
+    cache: Option<Cache>,
+    rebuild_arrows: bool,
+    arrows: Vec<DualArrow>,
     selected_packet_idx: Option<usize>,
-    cached_packets: Vec<PacketInfo>,
-    cache_valid: bool,
     show_loss_markers: bool,
     dual_time_scale: f32,
     files_swapped: bool,
@@ -173,13 +155,10 @@ pub struct MetricsEvent {
 }
 
 struct DualArrow {
+    packet: Arc<PacketInfo>,
     send_time: f64,
     recv_time: f64,
     from_left: bool,
-    packet_type_short: String,
-    packet_number: u64,
-    path_id: Option<u64>,
-    frames: Vec<FrameType>,
     is_lost: bool,
     sent_event_idx: usize,         // Index in the sending file
     recv_event_idx: Option<usize>, // Index in the receiving file (None if not received)
@@ -207,12 +186,13 @@ struct TimeContext<'a> {
     pixels_per_ms: f32,
 }
 
-impl SequenceDiagram {
-    pub fn new() -> Self {
+impl Default for SequenceDiagram {
+    fn default() -> Self {
         Self {
+            cache: None,
+            arrows: Vec::new(),
+            rebuild_arrows: true,
             selected_packet_idx: None,
-            cached_packets: Vec::new(),
-            cache_valid: false,
             show_loss_markers: true,
             dual_time_scale: 30.0,
             files_swapped: false,
@@ -226,22 +206,23 @@ impl SequenceDiagram {
             last_metrics: None,
         }
     }
+}
 
+impl SequenceDiagram {
     pub fn invalidate_cache(&mut self) {
-        self.cache_valid = false;
-        self.cached_packets.clear();
+        self.cache = None;
+        self.rebuild_arrows = true;
     }
 
-    pub fn show(
+    pub fn show_single(
         &mut self,
         ui: &mut egui::Ui,
-        qlog_data: &QlogData,
+        data: &QlogData,
         _correlation: &PacketCorrelation,
         selected_event_idx: &mut Option<usize>,
     ) {
-        self.ensure_cache(qlog_data);
-
-        if self.cached_packets.is_empty() {
+        let cache = self.cache.get_or_insert_with(|| Cache::build(&data, None));
+        if cache.is_empty() {
             ui.label("No packet events found in qlog");
             return;
         }
@@ -249,31 +230,32 @@ impl SequenceDiagram {
         ui.horizontal(|ui| ui.heading("Sequence Diagram"));
 
         // Convert all packets to dual arrows (with implied second endpoint)
-        let arrows = Self::build_single_file_arrows(
-            &self.cached_packets,
-            &(0..self.cached_packets.len()).collect::<Vec<_>>(),
-        );
-
-        if arrows.is_empty() {
+        if self.rebuild_arrows {
+            self.rebuild_arrows = false;
+            self.arrows = Self::build_single_file_arrows(
+                &cache.left.packets,
+                &(0..cache.left.packets.len()).collect::<Vec<_>>(),
+            );
+        }
+        if self.arrows.is_empty() {
             ui.label("No packet events found");
             return;
         }
 
-        let (min_time, _max_time, time_range) = Self::compute_time_bounds(&arrows);
+        let (min_time, _max_time, time_range) = Self::compute_time_bounds(&self.arrows);
         let gaps = if self.compress_gaps {
-            Self::detect_gaps(&arrows, min_time, self.dual_time_scale)
+            Self::detect_gaps(&self.arrows, min_time, self.dual_time_scale)
         } else {
             Vec::new()
         };
 
-        self.render_dual_controls(ui, &arrows, time_range);
+        self.render_dual_controls(ui, time_range);
 
         // Use the same dual rendering for single file (with dummy recv_selected_event_idx)
         let mut recv_selected_event_idx = None;
         let mut selected_file_idx = 0;
         self.render_dual_file_diagram(
             ui,
-            &arrows,
             min_time,
             time_range,
             &gaps,
@@ -294,55 +276,51 @@ impl SequenceDiagram {
         recv_selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
     ) {
-        let (left_file, right_file) = if self.files_swapped {
-            (file_b, file_a)
+        let cache = self
+            .cache
+            .get_or_insert_with(|| Cache::build(&file_a.qlog_data, Some(&file_b.qlog_data)));
+        let cache_a = &cache.left;
+        let cache_b = cache.right.as_ref().unwrap();
+        let ((file_left, cache_left), (file_right, cache_right)) = if self.files_swapped {
+            ((file_a, cache_a), (file_b, cache_b))
         } else {
-            (file_a, file_b)
+            ((file_b, cache_b), (file_a, cache_a))
         };
 
-        // Extract metrics events from the left file
-        self.extract_metrics_events(&left_file.qlog_data);
+        if self.rebuild_arrows {
+            self.rebuild_arrows = false;
+            // Extract metrics events from the left file
+            self.arrows = Self::build_dual_arrows(cache_left, cache_right);
+            self.extract_metrics_events(&file_left.qlog_data);
+        }
 
-        let arrows = Self::build_dual_arrows(left_file, right_file);
-
-        if arrows.is_empty() {
+        if self.arrows.is_empty() {
             ui.label("No packet events found in either file");
             return;
         }
 
         ui.horizontal(|ui| ui.heading("Sequence Diagram (Dual File)"));
 
-        let (min_time, _max_time, time_range) = Self::compute_time_bounds(&arrows);
+        let (min_time, _max_time, time_range) = Self::compute_time_bounds(&self.arrows);
         let gaps = if self.compress_gaps {
-            Self::detect_gaps(&arrows, min_time, self.dual_time_scale)
+            Self::detect_gaps(&self.arrows, min_time, self.dual_time_scale)
         } else {
             Vec::new()
         };
 
-        self.render_dual_controls(ui, &arrows, time_range);
+        self.render_dual_controls(ui, time_range);
 
         self.render_dual_file_diagram(
             ui,
-            &arrows,
             min_time,
             time_range,
             &gaps,
             selected_event_idx,
             recv_selected_event_idx,
             selected_file_idx,
-            &left_file.label,
-            &right_file.label,
+            &file_left.label,
+            &file_right.label,
         );
-    }
-
-    fn ensure_cache(&mut self, qlog_data: &QlogData) {
-        if self.cache_valid {
-            return;
-        }
-        let extracted = Self::extract_packets(qlog_data);
-        self.cached_packets = extracted.packets;
-        self.extract_metrics_events(qlog_data);
-        self.cache_valid = true;
     }
 
     fn calculate_lane_layout(
@@ -402,8 +380,8 @@ impl SequenceDiagram {
         }
     }
 
-    fn build_single_file_arrows(
-        packets: &[PacketInfo],
+    fn build_single_file_arrows<'a>(
+        packets: &'a [Arc<PacketInfo>],
         filtered_indices: &[usize],
     ) -> Vec<DualArrow> {
         // Convert single-file packets to dual arrows
@@ -426,13 +404,10 @@ impl SequenceDiagram {
                 };
 
                 DualArrow {
+                    packet: p.clone(),
                     send_time: if from_left { p.time } else { p.time - 1.0 },
                     recv_time,
                     from_left,
-                    packet_type_short: p.packet_type_short.clone(),
-                    packet_number: p.packet_number,
-                    path_id: p.path_id,
-                    frames: p.frames.clone(),
                     is_lost: false, // In single-file, we don't know if it's truly lost
                     sent_event_idx: p.event_idx,
                     recv_event_idx,
@@ -441,11 +416,14 @@ impl SequenceDiagram {
             .collect()
     }
 
-    fn build_dual_arrows(left_file: &LoadedFile, right_file: &LoadedFile) -> Vec<DualArrow> {
-        let left_packets = Self::extract_packets(&left_file.qlog_data).packets;
-        let right_packets = Self::extract_packets(&right_file.qlog_data).packets;
+    fn build_dual_arrows(
+        left_packets: &ExtractedPackets,
+        right_packets: &ExtractedPackets,
+    ) -> Vec<DualArrow> {
+        let left_packets = &left_packets.packets;
+        let right_packets = &right_packets.packets;
 
-        let recv_info = |packets: &[PacketInfo]| -> HashMap<(String, u64, u64), (f64, usize)> {
+        let recv_info = |packets: &[Arc<PacketInfo>]| -> HashMap<(String, u64, u64), (f64, usize)> {
             packets
                 .iter()
                 .filter(|p| p.direction == PacketDirection::Received)
@@ -465,7 +443,8 @@ impl SequenceDiagram {
         let left_recv = recv_info(&left_packets);
         let right_recv = recv_info(&right_packets);
 
-        let mut arrows: Vec<DualArrow> = Vec::new();
+        let mut arrows: Vec<DualArrow> =
+            Vec::with_capacity(left_packets.len() + right_packets.len());
 
         for (packets, recv_info, from_left) in [
             (&left_packets, &right_recv, true),
@@ -489,13 +468,10 @@ impl SequenceDiagram {
                 };
 
                 arrows.push(DualArrow {
+                    packet: p.clone(),
                     send_time: p.time,
                     recv_time,
                     from_left,
-                    packet_type_short: p.packet_type_short.clone(),
-                    packet_number: p.packet_number,
-                    path_id: p.path_id,
-                    frames: p.frames.clone(),
                     is_lost: recv_event_idx.is_none(),
                     sent_event_idx: p.event_idx,
                     recv_event_idx,
@@ -610,13 +586,13 @@ impl SequenceDiagram {
             + 100.0
     }
 
-    fn render_dual_controls(&mut self, ui: &mut egui::Ui, arrows: &[DualArrow], time_range: f64) {
-        let total_loss_count = arrows.iter().filter(|a| a.is_lost).count();
+    fn render_dual_controls(&mut self, ui: &mut egui::Ui, time_range: f64) {
+        let total_loss_count = self.arrows.iter().filter(|a| a.is_lost).count();
 
         ui.horizontal(|ui| {
             ui.label(format!(
                 "{} arrows | 0.00 - {:.2} ms ({:.1}s)",
-                arrows.len(),
+                self.arrows.len(),
                 time_range,
                 time_range / 1000.0
             ));
@@ -644,6 +620,7 @@ impl SequenceDiagram {
             ui.separator();
             if ui.button("Swap").clicked() {
                 self.files_swapped = !self.files_swapped;
+                self.rebuild_arrows = true;
             }
         });
         ui.separator();
@@ -653,7 +630,6 @@ impl SequenceDiagram {
     fn render_dual_file_diagram(
         &mut self,
         ui: &mut egui::Ui,
-        arrows: &[DualArrow],
         min_time: f64,
         time_range: f64,
         gaps: &[TimeGap],
@@ -699,8 +675,8 @@ impl SequenceDiagram {
                     // Collect unique path IDs from arrows by direction
                     let mut left_path_ids = BTreeSet::new();
                     let mut right_path_ids = BTreeSet::new();
-                    for arrow in arrows.iter() {
-                        if let Some(pid) = arrow.path_id {
+                    for arrow in self.arrows.iter() {
+                        if let Some(pid) = arrow.packet.path_id {
                             if arrow.from_left {
                                 left_path_ids.insert(pid);
                             } else {
@@ -772,11 +748,10 @@ impl SequenceDiagram {
                     draw_gap_indicators(&painter, &layout, gaps, &time_to_y);
                 }
 
-                let send_time_counts = Self::count_simultaneous_sends(arrows);
+                let send_time_counts = Self::count_simultaneous_sends(&self.arrows);
                 let arrow_rects = self.draw_dual_arrows(
                     &painter,
                     &layout,
-                    arrows,
                     &send_time_counts,
                     &time_to_y,
                     lane_layout.as_ref(),
@@ -794,7 +769,11 @@ impl SequenceDiagram {
                 self.draw_selection_indicator(&painter, &layout, viewport, arrow_rects.len());
 
                 // Collect unique path_ids for legend
-                let mut path_ids: Vec<u64> = arrows.iter().filter_map(|a| a.path_id).collect();
+                let mut path_ids: Vec<u64> = self
+                    .arrows
+                    .iter()
+                    .filter_map(|a| a.packet.path_id)
+                    .collect();
                 path_ids.sort_unstable();
                 path_ids.dedup();
 
@@ -818,11 +797,11 @@ impl SequenceDiagram {
         &self,
         painter: &Painter,
         layout: &DiagramLayout,
-        arrows: &[DualArrow],
         send_time_counts: &HashMap<i64, usize>,
         time_to_y: &impl Fn(f64) -> f32,
         lane_layout: Option<&PathLaneLayout>,
     ) -> Vec<(usize, usize, Option<usize>, bool, Rect)> {
+        let arrows = &self.arrows;
         let mut arrow_rects = Vec::new();
         let mut send_time_indices: HashMap<i64, usize> = HashMap::new();
 
@@ -834,7 +813,7 @@ impl SequenceDiagram {
             let (start_x, end_x) = if let Some(lanes) = lane_layout {
                 if lanes.use_lanes {
                     // Use lane positions
-                    let path_id = arrow.path_id.unwrap_or(0);
+                    let path_id = arrow.packet.path_id.unwrap_or(0);
                     if arrow.from_left {
                         let start = lanes
                             .left_lanes
@@ -878,7 +857,7 @@ impl SequenceDiagram {
             };
 
             // Use path color for multipath visualization
-            let color = path_color(arrow.path_id.unwrap_or(0));
+            let color = path_color(arrow.packet.path_id.unwrap_or(0));
 
             let time_key = (arrow.send_time * 1000.0) as i64;
             let count = *send_time_counts.get(&time_key).unwrap_or(&1);
@@ -945,16 +924,19 @@ impl SequenceDiagram {
             let tag_x = (start_x + actual_end_x) / 2.0;
             let tag_y = (y_send_adjusted + actual_end_y) / 2.0;
 
-            draw_frame_tags(painter, &arrow.frames, tag_x, tag_y, 32.0, 3);
+            draw_frame_tags(painter, &arrow.packet.frames, tag_x, tag_y, 32.0, 3);
 
             let info_offset = if arrow.from_left { 5.0 } else { -5.0 };
-            let label = if let Some(pid) = arrow.path_id {
+            let label = if let Some(pid) = arrow.packet.path_id {
                 format!(
                     "{}:{} p{}",
-                    arrow.packet_type_short, arrow.packet_number, pid
+                    arrow.packet.packet_type_short, arrow.packet.packet_number, pid
                 )
             } else {
-                format!("{}:{}", arrow.packet_type_short, arrow.packet_number)
+                format!(
+                    "{}:{}",
+                    arrow.packet.packet_type_short, arrow.packet.packet_number
+                )
             };
             painter.text(
                 Pos2::new(tag_x + info_offset, tag_y - 10.0),
@@ -1115,52 +1097,55 @@ impl SequenceDiagram {
     fn extract_packets(qlog_data: &QlogData) -> ExtractedPackets {
         let mut result = ExtractedPackets::default();
 
-        for (idx, event) in qlog_data.events.iter().enumerate() {
-            let (header, direction, frames_iter): (_, _, Box<dyn Iterator<Item = _>>) =
-                match &event.data {
-                    EventData::PacketSent(d) => (
-                        &d.header,
-                        PacketDirection::Sent,
-                        Box::new(d.frames.iter().flatten()) as Box<dyn Iterator<Item = _>>,
-                    ),
-                    EventData::PacketReceived(d) => (
-                        &d.header,
-                        PacketDirection::Received,
-                        Box::new(d.frames.iter().flatten()) as Box<dyn Iterator<Item = _>>,
-                    ),
-                    _ => continue,
-                };
+        let packets = qlog_data
+            .events
+            .par_iter()
+            .enumerate()
+            .filter_map(|(idx, event)| {
+                let (header, direction, frames_iter): (_, _, &mut dyn Iterator<Item = _>) =
+                    match &event.data {
+                        EventData::PacketSent(d) => (
+                            &d.header,
+                            PacketDirection::Sent,
+                            &mut d.frames.iter().flatten() as &mut dyn Iterator<Item = _>,
+                        ),
+                        EventData::PacketReceived(d) => (
+                            &d.header,
+                            PacketDirection::Received,
+                            &mut d.frames.iter().flatten() as &mut dyn Iterator<Item = _>,
+                        ),
+                        _ => return None,
+                    };
 
-            let packet_type_raw = format!("{:?}", header.packet_type);
-            let packet_type = utils::full_packet_type(&packet_type_raw);
-            let packet_type_short = utils::short_packet_type(&packet_type_raw);
+                let packet_type_raw = format!("{:?}", header.packet_type);
+                let packet_type = utils::full_packet_type(&packet_type_raw);
+                let packet_type_short = utils::short_packet_type(&packet_type_raw);
 
-            let frames: Vec<FrameType> = frames_iter
-                .map(|frame| {
-                    if let Some(sid) = utils::get_frame_stream_id(frame) {
-                        result.stream_ids.insert(sid);
-                    }
-                    FrameType::from_quic_frame(frame)
-                })
-                .collect();
+                let frames: Vec<FrameType> = frames_iter
+                    .map(|frame| FrameType::from_quic_frame(frame))
+                    .collect();
 
-            result.packet_types.insert(packet_type.clone());
+                // Unified path_id extraction from both formats
+                let path_id = Self::extract_path_id(event, header.path_id);
 
-            // Unified path_id extraction from both formats
-            let path_id = Self::extract_path_id(event, header.path_id);
-
-            result.packets.push(PacketInfo {
-                time: event.time as f64,
-                direction,
-                packet_type,
-                packet_type_short,
-                packet_number: header.packet_number.unwrap_or(0),
-                path_id,
-                frames,
-                event_idx: idx,
-            });
+                Some(Arc::new(PacketInfo {
+                    time: event.time as f64,
+                    direction,
+                    packet_type,
+                    packet_type_short,
+                    packet_number: header.packet_number.unwrap_or(0),
+                    path_id,
+                    frames,
+                    event_idx: idx,
+                }))
+            })
+            .collect();
+        result.packets = packets;
+        for packet in result.packets.iter() {
+            if !result.packet_types.contains(&packet.packet_type) {
+                result.packet_types.insert(packet.packet_type.clone());
+            }
         }
-
         result
     }
 
@@ -2246,8 +2231,7 @@ fn draw_loss_marker(painter: &Painter, center: Pos2, size: f32) {
 
 #[derive(Default)]
 struct ExtractedPackets {
-    packets: Vec<PacketInfo>,
-    stream_ids: BTreeSet<u64>,
+    packets: Vec<Arc<PacketInfo>>,
     packet_types: BTreeSet<String>,
 }
 
@@ -2333,4 +2317,21 @@ struct PacketInfo {
     path_id: Option<u64>,
     frames: Vec<FrameType>,
     event_idx: usize,
+}
+
+struct Cache {
+    left: ExtractedPackets,
+    right: Option<ExtractedPackets>,
+}
+
+impl Cache {
+    fn build(left: &QlogData, right: Option<&QlogData>) -> Self {
+        Self {
+            left: SequenceDiagram::extract_packets(left),
+            right: right.map(SequenceDiagram::extract_packets),
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.left.packets.is_empty()
+    }
 }
