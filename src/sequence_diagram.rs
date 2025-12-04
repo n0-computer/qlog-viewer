@@ -9,10 +9,9 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIter
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-const HEADER_HEIGHT: f32 = 40.0;
+const HEADER_HEIGHT: f32 = 65.0;
 const DUAL_LEFT_MARGIN: f32 = 180.0;
 const DUAL_RIGHT_MARGIN: f32 = 180.0;
-const GAP_INDICATOR_MARGIN: f32 = 120.0;
 const SENT_COLOR: Color32 = Color32::from_rgb(0, 150, 255);
 const RECEIVED_COLOR: Color32 = Color32::from_rgb(220, 80, 80);
 const LOSS_COLOR: Color32 = Color32::RED;
@@ -62,6 +61,7 @@ pub struct SequenceDiagram {
     pub show_metrics_events: bool,
     pub show_all_metrics: bool,
     pub metrics_visualization_mode: MetricsVisualizationMode,
+    pub overlay_graphs: bool,
     selected_metrics_event: Option<usize>,
     last_metrics: Option<LastMetricsState>,
 }
@@ -81,6 +81,20 @@ struct LastMetricsState {
     smoothed_rtt: Option<f32>,
     bytes_in_flight: Option<u64>,
     congestion_window: Option<u64>,
+}
+
+/// Key for identifying a specific path in metrics data
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PathKey {
+    file_idx: usize,
+    path_id: u64,
+}
+
+/// Metric data points for a specific path
+#[derive(Debug, Clone, Default)]
+struct PathMetricData {
+    bytes_in_flight: Vec<(f64, u64)>,
+    rtt: Vec<(f64, f32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,10 +162,11 @@ pub struct MetricsEvent {
     pub color: Color32,
     pub event_idx: usize,
     pub display_style: MetricsDisplayStyle,
+    pub file_idx: usize, // Which qlog file this event came from (0=left, 1=right)
+    pub path_id: Option<u64>, // Path ID for multipath visualization
     // Metric values for graph rendering
     pub smoothed_rtt: Option<f32>,
     pub bytes_in_flight: Option<u64>,
-    pub congestion_window: Option<u64>,
 }
 
 struct DualArrow {
@@ -202,6 +217,7 @@ impl Default for SequenceDiagram {
             show_metrics_events: true, // Default: visible
             show_all_metrics: true,    // Default: show all
             metrics_visualization_mode: MetricsVisualizationMode::Graphs, // Default: show graphs
+            overlay_graphs: true,      // Default: overlaid
             selected_metrics_event: None,
             last_metrics: None,
         }
@@ -221,7 +237,7 @@ impl SequenceDiagram {
         _correlation: &PacketCorrelation,
         selected_event_idx: &mut Option<usize>,
     ) {
-        let cache = self.cache.get_or_insert_with(|| Cache::build(&data, None));
+        let cache = self.cache.get_or_insert_with(|| Cache::build(data, None));
         if cache.is_empty() {
             ui.label("No packet events found in qlog");
             return;
@@ -288,9 +304,10 @@ impl SequenceDiagram {
 
         if self.rebuild_arrows {
             self.rebuild_arrows = false;
-            // Extract metrics events from the left file
             self.arrows = Self::build_dual_arrows(cache_left, cache_right);
-            self.extract_metrics_events(&file_left.qlog_data);
+            self.metrics_events.clear();
+            self.extract_metrics_events(&file_left.qlog_data, false, 0);
+            self.extract_metrics_events(&file_right.qlog_data, true, 1);
         }
 
         if self.arrows.is_empty() {
@@ -344,7 +361,7 @@ impl SequenceDiagram {
 
     fn calculate_lane_layout(
         &self,
-        rect: &Rect,
+        layout: &DiagramLayout,
         left_path_ids: &[u64],
         right_path_ids: &[u64],
     ) -> PathLaneLayout {
@@ -355,38 +372,51 @@ impl SequenceDiagram {
             return PathLaneLayout {
                 left_lanes: HashMap::new(),
                 right_lanes: HashMap::new(),
-                center_x: rect.center().x,
+                center_x: (layout.left_x + layout.right_x) / 2.0,
                 use_lanes: false,
             };
         }
 
-        let available_width = rect.width();
-        let center_x = rect.center().x;
-
-        // Allocate 35% of width to each side, 30% in middle for arrows
-        let left_width = available_width * 0.35;
-        let right_width = available_width * 0.35;
-
-        let left_start = rect.left() + 50.0; // Some margin from edge
-        let right_end = rect.right() - 50.0;
+        let center_x = (layout.left_x + layout.right_x) / 2.0;
 
         let mut left_lanes = HashMap::new();
         let mut right_lanes = HashMap::new();
 
-        // Calculate left lane positions
-        if !left_path_ids.is_empty() {
-            let lane_spacing = left_width / (left_path_ids.len() as f32 + 1.0);
-            for (i, &path_id) in left_path_ids.iter().enumerate() {
-                let x = left_start + lane_spacing * (i + 1) as f32;
+        // Lanes should be positioned WITHIN the sequence diagram area,
+        // between the left timeline and center, and between center and right timeline
+        // This area is independent of graphs which are drawn outside the timelines
+
+        // Calculate lane positions with proper spacing
+        // - Edge margin: 15px from time labels
+        // - Center gap: 2X the spacing between adjacent lanes
+        // - All other gaps: X (uniform)
+        const LANE_EDGE_MARGIN: f32 = 15.0;
+
+        let num_paths = left_path_ids.len().max(right_path_ids.len());
+
+        if num_paths > 0 {
+            // Calculate base spacing unit
+            // Layout: [margin] pN [...] p1 [X] p0 [2X] p0 [X] p1 [...] pN [margin]
+            // For N paths: need N spacing units from center to outermost lane on each side
+            // Total width available (excluding margins)
+            let total_width =
+                (layout.right_x - LANE_EDGE_MARGIN) - (layout.left_x + LANE_EDGE_MARGIN);
+            // Divide by 2*N to get base spacing unit
+            let base_spacing = total_width / (2.0 * num_paths as f32);
+
+            // Position left lanes working from center outward (reverse order for mirroring)
+            for (i, &path_id) in left_path_ids.iter().rev().enumerate() {
+                // Position from center: p2 at -3*base (leftmost), p1 at -2*base, p0 at -1*base (closest)
+                let offset = (left_path_ids.len() - i) as f32;
+                let x = center_x - offset * base_spacing;
                 left_lanes.insert(path_id, x);
             }
-        }
 
-        // Calculate right lane positions
-        if !right_path_ids.is_empty() {
-            let lane_spacing = right_width / (right_path_ids.len() as f32 + 1.0);
+            // Position right lanes working from center outward
             for (i, &path_id) in right_path_ids.iter().enumerate() {
-                let x = right_end - right_width + lane_spacing * (i + 1) as f32;
+                // Position from center: p0 at +1*base, p1 at +2*base, p2 at +3*base
+                let offset = (i + 1) as f32;
+                let x = center_x + offset * base_spacing;
                 right_lanes.insert(path_id, x);
             }
         }
@@ -399,8 +429,8 @@ impl SequenceDiagram {
         }
     }
 
-    fn build_single_file_arrows<'a>(
-        packets: &'a [Arc<PacketInfo>],
+    fn build_single_file_arrows(
+        packets: &[Arc<PacketInfo>],
         filtered_indices: &[usize],
     ) -> Vec<DualArrow> {
         // Convert single-file packets to dual arrows
@@ -459,8 +489,8 @@ impl SequenceDiagram {
                 .collect()
         };
 
-        let left_recv = recv_info(&left_packets);
-        let right_recv = recv_info(&right_packets);
+        let left_recv = recv_info(left_packets);
+        let right_recv = recv_info(right_packets);
 
         let mut arrows: Vec<DualArrow> =
             Vec::with_capacity(left_packets.len() + right_packets.len());
@@ -641,6 +671,51 @@ impl SequenceDiagram {
                 self.files_swapped = !self.files_swapped;
                 self.rebuild_arrows = true;
             }
+
+            // Metrics options
+            ui.separator();
+            if ui
+                .checkbox(&mut self.show_metrics_events, "Show Metrics")
+                .changed()
+            {
+                self.invalidate_cache();
+            }
+
+            if self.show_metrics_events {
+                ui.separator();
+                if ui
+                    .radio(
+                        self.metrics_visualization_mode == MetricsVisualizationMode::Events,
+                        "Events",
+                    )
+                    .clicked()
+                {
+                    self.metrics_visualization_mode = MetricsVisualizationMode::Events;
+                }
+                if ui
+                    .radio(
+                        self.metrics_visualization_mode == MetricsVisualizationMode::Graphs,
+                        "Graphs",
+                    )
+                    .clicked()
+                {
+                    self.metrics_visualization_mode = MetricsVisualizationMode::Graphs;
+                }
+
+                // Show the "Overlay" toggle when in Graphs mode
+                if self.metrics_visualization_mode == MetricsVisualizationMode::Graphs {
+                    ui.checkbox(&mut self.overlay_graphs, "Overlay");
+                }
+
+                // Show "Show All Metrics Updates" when in Events mode
+                if self.metrics_visualization_mode == MetricsVisualizationMode::Events
+                    && ui
+                        .checkbox(&mut self.show_all_metrics, "Show All Metrics Updates")
+                        .changed()
+                {
+                    self.invalidate_cache();
+                }
+            }
         });
         ui.separator();
     }
@@ -674,9 +749,76 @@ impl SequenceDiagram {
                     ui.allocate_painter(desired_size, Sense::click_and_drag());
                 let rect = response.rect;
 
+                // Calculate margins based on graph requirements
+                let (left_margin, right_margin) = if self.show_metrics_events
+                    && self.metrics_visualization_mode == MetricsVisualizationMode::Graphs
+                {
+                    // Count paths for each side to determine space needed
+                    let (left_path_count, right_path_count) = if self.overlay_graphs {
+                        // In overlay mode, we just need 2 strips per side if there are any paths
+                        let has_left = self.metrics_events.iter().any(|e| e.file_idx == 0);
+                        let has_right = self.metrics_events.iter().any(|e| e.file_idx == 1);
+                        (if has_left { 1 } else { 0 }, if has_right { 1 } else { 0 })
+                    } else {
+                        // In split mode, count unique paths per side
+                        use std::collections::BTreeSet;
+                        let mut left_paths = BTreeSet::new();
+                        let mut right_paths = BTreeSet::new();
+                        for event in &self.metrics_events {
+                            if event.file_idx == 0 {
+                                left_paths.insert(event.path_id);
+                            } else {
+                                right_paths.insert(event.path_id);
+                            }
+                        }
+                        (left_paths.len(), right_paths.len())
+                    };
+
+                    const STRIP_WIDTH: f32 = 40.0;
+                    const TIME_LABEL_WIDTH: f32 = 50.0;
+                    const EDGE_PADDING: f32 = 10.0;
+                    const STRIP_SPACING: f32 = 8.0;
+                    const PATH_SET_SPACING: f32 = 12.0;
+
+                    let left_graph_width = if left_path_count > 0 {
+                        if self.overlay_graphs {
+                            // 2 strips (in flight + RTT) + spacing between them
+                            2.0 * STRIP_WIDTH + STRIP_SPACING
+                        } else {
+                            // Each path has 2 strips, with spacing between strips and paths
+                            let strips_per_path = 2.0;
+                            left_path_count as f32 * STRIP_WIDTH * strips_per_path
+                                + left_path_count as f32 * STRIP_SPACING
+                                + (left_path_count.saturating_sub(1)) as f32 * PATH_SET_SPACING
+                        }
+                    } else {
+                        0.0
+                    };
+
+                    let right_graph_width = if right_path_count > 0 {
+                        if self.overlay_graphs {
+                            2.0 * STRIP_WIDTH + STRIP_SPACING
+                        } else {
+                            let strips_per_path = 2.0;
+                            right_path_count as f32 * STRIP_WIDTH * strips_per_path
+                                + right_path_count as f32 * STRIP_SPACING
+                                + (right_path_count.saturating_sub(1)) as f32 * PATH_SET_SPACING
+                        }
+                    } else {
+                        0.0
+                    };
+
+                    let left_total = EDGE_PADDING + left_graph_width + TIME_LABEL_WIDTH;
+                    let right_total = TIME_LABEL_WIDTH + right_graph_width + EDGE_PADDING;
+                    (left_total, right_total)
+                } else {
+                    // No graphs shown, use default margins
+                    (DUAL_LEFT_MARGIN, DUAL_RIGHT_MARGIN)
+                };
+
                 let layout = DiagramLayout {
-                    left_x: rect.left() + DUAL_LEFT_MARGIN,
-                    right_x: rect.right() - DUAL_RIGHT_MARGIN,
+                    left_x: rect.left() + left_margin,
+                    right_x: rect.right() - right_margin,
                     top_y: rect.top() + HEADER_HEIGHT,
                     rect,
                 };
@@ -705,7 +847,7 @@ impl SequenceDiagram {
                     }
                     let left_vec: Vec<u64> = left_path_ids.into_iter().collect();
                     let right_vec: Vec<u64> = right_path_ids.into_iter().collect();
-                    Some(self.calculate_lane_layout(&rect, &left_vec, &right_vec))
+                    Some(self.calculate_lane_layout(&layout, &left_vec, &right_vec))
                 } else {
                     None
                 };
@@ -1140,9 +1282,7 @@ impl SequenceDiagram {
                 let packet_type = utils::full_packet_type(&packet_type_raw);
                 let packet_type_short = utils::short_packet_type(&packet_type_raw);
 
-                let frames: Vec<FrameType> = frames_iter
-                    .map(|frame| FrameType::from_quic_frame(frame))
-                    .collect();
+                let frames: Vec<FrameType> = frames_iter.map(FrameType::from_quic_frame).collect();
 
                 // Unified path_id extraction from both formats
                 let path_id = Self::extract_path_id(event, header.path_id);
@@ -1168,11 +1308,15 @@ impl SequenceDiagram {
         result
     }
 
-    fn extract_metrics_events(&mut self, qlog: &QlogData) {
-        self.metrics_events.clear();
-        self.last_metrics = None;
+    fn extract_metrics_events(&mut self, qlog: &QlogData, append: bool, file_idx: usize) {
+        if !append {
+            self.metrics_events.clear();
+            self.last_metrics = None;
+        }
 
         for (idx, event) in qlog.events.iter().enumerate() {
+            let path_id = Self::extract_path_id(event, None);
+
             let metrics_event = match &event.data {
                 EventData::ConnectionStarted(_) => {
                     let event_type = MetricsEventType::ConnectionStarted;
@@ -1184,18 +1328,16 @@ impl SequenceDiagram {
                         color: event_type.color(),
                         event_idx: idx,
                         display_style: event_type.display_style(),
+                        file_idx,
+                        path_id,
                         smoothed_rtt: None,
                         bytes_in_flight: None,
-                        congestion_window: None,
                     })
                 }
 
                 EventData::MetricsUpdated(data) => {
                     // Only create event if there's meaningful data
-                    if data.smoothed_rtt.is_some()
-                        || data.bytes_in_flight.is_some()
-                        || data.congestion_window.is_some()
-                    {
+                    if data.smoothed_rtt.is_some() || data.bytes_in_flight.is_some() {
                         let event_type = MetricsEventType::MetricsUpdated;
 
                         // Format short display text
@@ -1260,9 +1402,10 @@ impl SequenceDiagram {
                                 color: event_type.color(),
                                 event_idx: idx,
                                 display_style: event_type.display_style(),
+                                file_idx,
+                                path_id: data.path_id,
                                 smoothed_rtt: data.smoothed_rtt,
                                 bytes_in_flight: data.bytes_in_flight,
-                                congestion_window: data.congestion_window,
                             })
                         }
                     } else {
@@ -1283,9 +1426,10 @@ impl SequenceDiagram {
                         color: event_type.color(),
                         event_idx: idx,
                         display_style: event_type.display_style(),
+                        file_idx,
+                        path_id: data.path_id,
                         smoothed_rtt: None,
                         bytes_in_flight: None,
-                        congestion_window: None,
                     })
                 }
 
@@ -1299,9 +1443,10 @@ impl SequenceDiagram {
                         color: event_type.color(),
                         event_idx: idx,
                         display_style: event_type.display_style(),
+                        file_idx,
+                        path_id,
                         smoothed_rtt: None,
                         bytes_in_flight: None,
-                        congestion_window: None,
                     })
                 }
 
@@ -1317,9 +1462,10 @@ impl SequenceDiagram {
                                 color: event_type.color(),
                                 event_idx: idx,
                                 display_style: event_type.display_style(),
+                                file_idx,
+                                path_id,
                                 smoothed_rtt: None,
                                 bytes_in_flight: None,
-                                congestion_window: None,
                             })
                         } else {
                             None
@@ -1587,74 +1733,428 @@ impl SequenceDiagram {
         time_to_y: &impl Fn(f64) -> f32,
         viewport: &Rect,
     ) {
-        const STRIP_WIDTH: f32 = 60.0;
-        const STRIP_SPACING: f32 = 10.0;
-        const MARGIN_FROM_TIMELINE: f32 = 50.0;
+        const STRIP_SPACING: f32 = 8.0;
+        const PATH_SET_SPACING: f32 = 12.0;
+        const STRIP_WIDTH: f32 = 40.0;
+        const EDGE_PADDING: f32 = 10.0;
 
-        // Extract metrics data points from MetricsUpdated events
-        let mut cwnd_points: Vec<(f64, u64)> = Vec::new();
-        let mut bytes_in_flight_points: Vec<(f64, u64)> = Vec::new();
-        let mut rtt_points: Vec<(f64, f32)> = Vec::new();
+        if self.overlay_graphs {
+            // Overlay mode: group by (file_idx, path_id), then overlay paths per file
+            let mut path_metrics: HashMap<PathKey, PathMetricData> = HashMap::new();
 
-        for event in &self.metrics_events {
-            if event.event_type == MetricsEventType::MetricsUpdated {
-                if let Some(cwnd) = event.congestion_window {
-                    cwnd_points.push((event.time, cwnd));
+            for event in &self.metrics_events {
+                if event.event_type == MetricsEventType::MetricsUpdated {
+                    let pid = event.path_id.unwrap_or(0);
+                    let key = PathKey {
+                        file_idx: event.file_idx,
+                        path_id: pid,
+                    };
+                    let entry = path_metrics.entry(key).or_default();
+
+                    if let Some(bif) = event.bytes_in_flight {
+                        entry.bytes_in_flight.push((event.time, bif));
+                    }
+                    if let Some(rtt) = event.smoothed_rtt {
+                        entry.rtt.push((event.time, rtt));
+                    }
                 }
-                if let Some(bif) = event.bytes_in_flight {
-                    bytes_in_flight_points.push((event.time, bif));
+            }
+
+            // Separate paths by file
+            let mut left_paths: Vec<u64> = Vec::new();
+            let mut right_paths: Vec<u64> = Vec::new();
+
+            for key in path_metrics.keys() {
+                if key.file_idx == 0 {
+                    if !left_paths.contains(&key.path_id) {
+                        left_paths.push(key.path_id);
+                    }
+                } else if !right_paths.contains(&key.path_id) {
+                    right_paths.push(key.path_id);
                 }
-                if let Some(rtt) = event.smoothed_rtt {
-                    rtt_points.push((event.time, rtt));
+            }
+
+            left_paths.sort_unstable();
+            right_paths.sort_unstable();
+
+            // Draw left side overlaid graphs
+            if !left_paths.is_empty() {
+                let bif_x = layout.rect.min.x + EDGE_PADDING;
+                let rtt_x = bif_x + STRIP_WIDTH + STRIP_SPACING;
+
+                // Collect all in-flight and RTT data for left file paths
+                let mut left_bif: Vec<(u64, Vec<(f64, u64)>)> = Vec::new();
+                let mut left_rtt: Vec<(u64, Vec<(f64, f32)>)> = Vec::new();
+
+                for &path_id in &left_paths {
+                    let key = PathKey {
+                        file_idx: 0,
+                        path_id,
+                    };
+                    if let Some(data) = path_metrics.get(&key) {
+                        if !data.bytes_in_flight.is_empty() {
+                            left_bif.push((path_id, data.bytes_in_flight.clone()));
+                        }
+                        if !data.rtt.is_empty() {
+                            left_rtt.push((path_id, data.rtt.clone()));
+                        }
+                    }
                 }
+
+                Self::draw_metric_strip_overlaid(
+                    painter,
+                    "in flight",
+                    &left_bif,
+                    bif_x,
+                    STRIP_WIDTH,
+                    layout,
+                    time_to_y,
+                    ui,
+                    viewport,
+                );
+
+                Self::draw_metric_strip_f32_overlaid(
+                    painter,
+                    "RTT",
+                    &left_rtt,
+                    rtt_x,
+                    STRIP_WIDTH,
+                    layout,
+                    time_to_y,
+                    ui,
+                    viewport,
+                );
+            }
+
+            // Draw right side overlaid graphs
+            if !right_paths.is_empty() {
+                let rtt_x = layout.rect.max.x - EDGE_PADDING - STRIP_WIDTH * 2.0 - STRIP_SPACING;
+                let bif_x = rtt_x + STRIP_WIDTH + STRIP_SPACING;
+
+                // Collect all in-flight and RTT data for right file paths
+                let mut right_bif: Vec<(u64, Vec<(f64, u64)>)> = Vec::new();
+                let mut right_rtt: Vec<(u64, Vec<(f64, f32)>)> = Vec::new();
+
+                for &path_id in &right_paths {
+                    let key = PathKey {
+                        file_idx: 1,
+                        path_id,
+                    };
+                    if let Some(data) = path_metrics.get(&key) {
+                        if !data.bytes_in_flight.is_empty() {
+                            right_bif.push((path_id, data.bytes_in_flight.clone()));
+                        }
+                        if !data.rtt.is_empty() {
+                            right_rtt.push((path_id, data.rtt.clone()));
+                        }
+                    }
+                }
+
+                Self::draw_metric_strip_overlaid(
+                    painter,
+                    "in flight",
+                    &right_bif,
+                    bif_x,
+                    STRIP_WIDTH,
+                    layout,
+                    time_to_y,
+                    ui,
+                    viewport,
+                );
+
+                Self::draw_metric_strip_f32_overlaid(
+                    painter,
+                    "RTT",
+                    &right_rtt,
+                    rtt_x,
+                    STRIP_WIDTH,
+                    layout,
+                    time_to_y,
+                    ui,
+                    viewport,
+                );
+            }
+        } else {
+            // Split mode: group by (file_idx, path_id)
+            let mut path_metrics: HashMap<PathKey, PathMetricData> = HashMap::new();
+
+            for event in &self.metrics_events {
+                if event.event_type == MetricsEventType::MetricsUpdated {
+                    let pid = event.path_id.unwrap_or(0);
+                    let key = PathKey {
+                        file_idx: event.file_idx,
+                        path_id: pid,
+                    };
+                    let entry = path_metrics.entry(key).or_default();
+
+                    if let Some(bif) = event.bytes_in_flight {
+                        entry.bytes_in_flight.push((event.time, bif));
+                    }
+                    if let Some(rtt) = event.smoothed_rtt {
+                        entry.rtt.push((event.time, rtt));
+                    }
+                }
+            }
+
+            let mut left_paths: Vec<u64> = Vec::new();
+            let mut right_paths: Vec<u64> = Vec::new();
+
+            for key in path_metrics.keys() {
+                if key.file_idx == 0 {
+                    if !left_paths.contains(&key.path_id) {
+                        left_paths.push(key.path_id);
+                    }
+                } else if !right_paths.contains(&key.path_id) {
+                    right_paths.push(key.path_id);
+                }
+            }
+
+            left_paths.sort_unstable();
+            right_paths.sort_unstable();
+
+            let strips_per_path = 2;
+
+            let mut draw_side =
+                |paths: &[u64], file_idx: usize, start_x: f32, going_right: bool| {
+                    if paths.is_empty() {
+                        return;
+                    }
+
+                    let num_paths = paths.len();
+                    let mut current_x = start_x;
+
+                    for &path_id in paths {
+                        let (bif_x, rtt_x) = if going_right {
+                            (current_x, current_x + STRIP_WIDTH + STRIP_SPACING)
+                        } else {
+                            let rtt_x =
+                                current_x - STRIP_WIDTH * strips_per_path as f32 - STRIP_SPACING;
+                            let bif_x = rtt_x + STRIP_WIDTH + STRIP_SPACING;
+                            (bif_x, rtt_x)
+                        };
+
+                        let color = path_color(path_id);
+
+                        let key = PathKey { file_idx, path_id };
+                        if let Some(data) = path_metrics.get(&key) {
+                            let label_prefix = if num_paths > 1 {
+                                format!("P{} ", path_id)
+                            } else {
+                                String::new()
+                            };
+
+                            Self::draw_metric_strip(
+                                painter,
+                                &format!("{}in flight", label_prefix),
+                                &data.bytes_in_flight,
+                                bif_x,
+                                STRIP_WIDTH,
+                                layout,
+                                time_to_y,
+                                color,
+                                ui,
+                                viewport,
+                            );
+
+                            Self::draw_metric_strip_f32(
+                                painter,
+                                &format!("{}RTT", label_prefix),
+                                &data.rtt,
+                                rtt_x,
+                                STRIP_WIDTH,
+                                layout,
+                                time_to_y,
+                                color,
+                                ui,
+                                viewport,
+                            );
+                        }
+
+                        if going_right {
+                            current_x += STRIP_WIDTH * strips_per_path as f32
+                                + STRIP_SPACING * (strips_per_path - 1) as f32
+                                + PATH_SET_SPACING;
+                        } else {
+                            current_x -= STRIP_WIDTH * strips_per_path as f32
+                                + STRIP_SPACING * (strips_per_path - 1) as f32
+                                + PATH_SET_SPACING;
+                        }
+                    }
+                };
+
+            draw_side(&left_paths, 0, layout.rect.min.x + EDGE_PADDING, true);
+            draw_side(&right_paths, 1, layout.rect.max.x - EDGE_PADDING, false);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_metric_strip_overlaid(
+        painter: &Painter,
+        label: &str,
+        path_data: &[(u64, Vec<(f64, u64)>)],
+        x: f32,
+        width: f32,
+        layout: &DiagramLayout,
+        time_to_y: &impl Fn(f64) -> f32,
+        _ui: &mut egui::Ui,
+        _viewport: &Rect,
+    ) {
+        if path_data.is_empty() {
+            return;
+        }
+
+        let rect = egui::Rect::from_min_max(
+            egui::Pos2::new(x, layout.top_y),
+            egui::Pos2::new(x + width, layout.rect.max.y),
+        );
+
+        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 30));
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, Color32::DARK_GRAY),
+            egui::epaint::StrokeKind::Inside,
+        );
+
+        painter.text(
+            egui::Pos2::new(x + width / 2.0, layout.top_y + 5.0),
+            egui::Align2::CENTER_TOP,
+            label,
+            egui::FontId::proportional(9.0),
+            Color32::LIGHT_GRAY,
+        );
+
+        // Find global min/max across all paths
+        let mut all_values = Vec::new();
+        for (_, points) in path_data {
+            for (_, v) in points {
+                all_values.push(*v);
             }
         }
 
-        // Calculate x positions for the three strips
-        let base_x = layout.left_x - MARGIN_FROM_TIMELINE;
-        let cwnd_x = base_x - STRIP_WIDTH * 3.0 - STRIP_SPACING * 2.0;
-        let bif_x = base_x - STRIP_WIDTH * 2.0 - STRIP_SPACING;
-        let rtt_x = base_x - STRIP_WIDTH;
+        if all_values.is_empty() {
+            return;
+        }
 
-        // Draw each graph strip
-        Self::draw_metric_strip(
-            painter,
-            "cwnd",
-            &cwnd_points,
-            cwnd_x,
-            STRIP_WIDTH,
-            layout,
-            time_to_y,
-            Color32::from_rgb(100, 150, 255),
-            ui,
-            viewport,
+        let max_value = *all_values.iter().max().unwrap();
+        let min_value = *all_values.iter().min().unwrap();
+        let value_range = if max_value > min_value {
+            max_value - min_value
+        } else {
+            1
+        };
+
+        // Draw each path in different color
+        for &(path_id, ref points) in path_data {
+            if points.is_empty() {
+                continue;
+            }
+
+            let color = path_color(path_id);
+            let mut prev_point: Option<egui::Pos2> = None;
+
+            for (time, value) in points {
+                let y = time_to_y(*time);
+                let normalized = (*value - min_value) as f32 / value_range as f32;
+                let point_x = x + 5.0 + normalized * (width - 10.0);
+                let point = egui::Pos2::new(point_x, y);
+
+                if let Some(prev) = prev_point {
+                    painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                }
+
+                painter.circle_filled(point, 2.5, color);
+                prev_point = Some(point);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_metric_strip_f32_overlaid(
+        painter: &Painter,
+        label: &str,
+        path_data: &[(u64, Vec<(f64, f32)>)],
+        x: f32,
+        width: f32,
+        layout: &DiagramLayout,
+        time_to_y: &impl Fn(f64) -> f32,
+        _ui: &mut egui::Ui,
+        _viewport: &Rect,
+    ) {
+        if path_data.is_empty() {
+            return;
+        }
+
+        let rect = egui::Rect::from_min_max(
+            egui::Pos2::new(x, layout.top_y),
+            egui::Pos2::new(x + width, layout.rect.max.y),
         );
 
-        Self::draw_metric_strip(
-            painter,
-            "in flight",
-            &bytes_in_flight_points,
-            bif_x,
-            STRIP_WIDTH,
-            layout,
-            time_to_y,
-            Color32::from_rgb(255, 150, 100),
-            ui,
-            viewport,
+        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 30));
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, Color32::DARK_GRAY),
+            egui::epaint::StrokeKind::Inside,
         );
 
-        Self::draw_metric_strip_f32(
-            painter,
-            "RTT",
-            &rtt_points,
-            rtt_x,
-            STRIP_WIDTH,
-            layout,
-            time_to_y,
-            Color32::from_rgb(150, 255, 100),
-            ui,
-            viewport,
+        painter.text(
+            egui::Pos2::new(x + width / 2.0, layout.top_y + 5.0),
+            egui::Align2::CENTER_TOP,
+            label,
+            egui::FontId::proportional(9.0),
+            Color32::LIGHT_GRAY,
         );
+
+        // Find global min/max across all paths
+        let mut all_values = Vec::new();
+        for (_, points) in path_data {
+            for (_, v) in points {
+                all_values.push(*v);
+            }
+        }
+
+        if all_values.is_empty() {
+            return;
+        }
+
+        let max_value = *all_values
+            .iter()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        let min_value = *all_values
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        let value_range = if max_value > min_value {
+            max_value - min_value
+        } else {
+            0.001
+        };
+
+        // Draw each path in different color
+        for &(path_id, ref points) in path_data {
+            if points.is_empty() {
+                continue;
+            }
+
+            let color = path_color(path_id);
+            let mut prev_point: Option<egui::Pos2> = None;
+
+            for (time, value) in points {
+                let y = time_to_y(*time);
+                let normalized = (*value - min_value) / value_range;
+                let point_x = x + 5.0 + normalized * (width - 10.0);
+                let point = egui::Pos2::new(point_x, y);
+
+                if let Some(prev) = prev_point {
+                    painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                }
+
+                painter.circle_filled(point, 2.5, color);
+                prev_point = Some(point);
+            }
+        }
     }
 
     fn format_bytes(bytes: u64) -> String {
@@ -1691,6 +2191,7 @@ impl SequenceDiagram {
             egui::Pos2::new(x, layout.top_y),
             egui::Pos2::new(x + width, layout.rect.max.y),
         );
+
         painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 30));
         painter.rect_stroke(
             rect,
@@ -1812,6 +2313,7 @@ impl SequenceDiagram {
             egui::Pos2::new(x, layout.top_y),
             egui::Pos2::new(x + width, layout.rect.max.y),
         );
+
         painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 30));
         painter.rect_stroke(
             rect,
@@ -2051,20 +2553,20 @@ fn draw_gap_indicators<F>(
             text_color,
         );
 
-        // Draw time range in right margin
-        let right_text_x = layout.right_x + GAP_INDICATOR_MARGIN;
+        // Draw time range inside sequence diagram on right side
+        let right_text_x = layout.right_x - 10.0;
         let start_label = format!("{:.1}ms", gap.start_time);
         let end_label = format!("{:.1}ms", gap.end_time);
         painter.text(
             Pos2::new(right_text_x, y_pos + 5.0),
-            egui::Align2::LEFT_TOP,
+            egui::Align2::RIGHT_TOP,
             &start_label,
             egui::FontId::proportional(9.0),
             Color32::from_rgb(120, 120, 120),
         );
         painter.text(
             Pos2::new(right_text_x, end_y - 5.0),
-            egui::Align2::LEFT_BOTTOM,
+            egui::Align2::RIGHT_BOTTOM,
             &end_label,
             egui::FontId::proportional(9.0),
             Color32::from_rgb(120, 120, 120),
@@ -2158,8 +2660,8 @@ fn draw_time_markers(
         );
 
         painter.text(
-            Pos2::new(layout.right_x + DUAL_RIGHT_MARGIN / 2.0, y),
-            egui::Align2::CENTER_CENTER,
+            Pos2::new(layout.right_x + 15.0, y),
+            egui::Align2::LEFT_CENTER,
             &label,
             egui::FontId::proportional(10.0),
             marker_color,
