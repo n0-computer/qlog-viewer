@@ -916,6 +916,7 @@ impl SequenceDiagram {
                     &send_time_counts,
                     &time_to_y,
                     lane_layout.as_ref(),
+                    &viewport,
                 );
 
                 self.handle_dual_selection(
@@ -961,14 +962,27 @@ impl SequenceDiagram {
         send_time_counts: &HashMap<i64, usize>,
         time_to_y: &impl Fn(f64) -> f32,
         lane_layout: Option<&PathLaneLayout>,
+        viewport: &Rect,
     ) -> Vec<(usize, usize, Option<usize>, bool, Rect)> {
         let arrows = &self.arrows;
         let mut arrow_rects = Vec::new();
         let mut send_time_indices: HashMap<i64, usize> = HashMap::new();
 
+        // Calculate visible y-range with some margin for elements that extend beyond the line
+        let margin = 50.0;
+        let visible_min_y = layout.rect.top() + viewport.top() - margin;
+        let visible_max_y = layout.rect.top() + viewport.bottom() + margin;
+
         for (arrow_idx, arrow) in arrows.iter().enumerate() {
             let y_send = time_to_y(arrow.send_time);
             let y_recv = time_to_y(arrow.recv_time);
+
+            // Skip arrows completely outside the visible viewport
+            let arrow_min_y = y_send.min(y_recv);
+            let arrow_max_y = y_send.max(y_recv);
+            if arrow_max_y < visible_min_y || arrow_min_y > visible_max_y {
+                continue;
+            }
 
             // Determine start and end positions based on lane mode
             let (start_x, end_x) = if let Some(lanes) = lane_layout {
