@@ -227,8 +227,6 @@ impl SequenceDiagram {
             return;
         }
 
-        ui.horizontal(|ui| ui.heading("Sequence Diagram"));
-
         // Convert all packets to dual arrows (with implied second endpoint)
         if self.rebuild_arrows {
             self.rebuild_arrows = false;
@@ -249,12 +247,13 @@ impl SequenceDiagram {
             Vec::new()
         };
 
-        self.render_dual_controls(ui, time_range);
+        self.render_header(ui);
+        self.render_controls(ui, time_range);
 
         // Use the same dual rendering for single file (with dummy recv_selected_event_idx)
         let mut recv_selected_event_idx = None;
         let mut selected_file_idx = 0;
-        self.render_dual_file_diagram(
+        self.render_diagram(
             ui,
             min_time,
             time_range,
@@ -299,8 +298,6 @@ impl SequenceDiagram {
             return;
         }
 
-        ui.horizontal(|ui| ui.heading("Sequence Diagram (Dual File)"));
-
         let (min_time, _max_time, time_range) = Self::compute_time_bounds(&self.arrows);
         let gaps = if self.compress_gaps {
             Self::detect_gaps(&self.arrows, min_time, self.dual_time_scale)
@@ -308,9 +305,9 @@ impl SequenceDiagram {
             Vec::new()
         };
 
-        self.render_dual_controls(ui, time_range);
-
-        self.render_dual_file_diagram(
+        self.render_header(ui);
+        self.render_controls(ui, time_range);
+        self.render_diagram(
             ui,
             min_time,
             time_range,
@@ -321,6 +318,28 @@ impl SequenceDiagram {
             &file_left.label,
             &file_right.label,
         );
+    }
+
+    fn render_header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Sequence Diagram");
+            ui.separator();
+            ui.label("Visualization mode");
+            egui::ComboBox::from_id_salt("visualization_mode")
+                .selected_text(format!("{:?}", self.visualization_mode))
+                .show_ui(ui, |ui| {
+                    for mode in [
+                        VisualizationMode::ColorCoded,
+                        VisualizationMode::VerticalLanes,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.visualization_mode,
+                            mode,
+                            format!("{mode:?}"),
+                        );
+                    }
+                });
+        });
     }
 
     fn calculate_lane_layout(
@@ -586,7 +605,7 @@ impl SequenceDiagram {
             + 100.0
     }
 
-    fn render_dual_controls(&mut self, ui: &mut egui::Ui, time_range: f64) {
+    fn render_controls(&mut self, ui: &mut egui::Ui, time_range: f64) {
         let total_loss_count = self.arrows.iter().filter(|a| a.is_lost).count();
 
         ui.horizontal(|ui| {
@@ -627,7 +646,7 @@ impl SequenceDiagram {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_dual_file_diagram(
+    fn render_diagram(
         &mut self,
         ui: &mut egui::Ui,
         min_time: f64,
