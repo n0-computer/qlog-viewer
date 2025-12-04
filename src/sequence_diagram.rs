@@ -64,6 +64,8 @@ pub struct SequenceDiagram {
     pub overlay_graphs: bool,
     selected_metrics_event: Option<usize>,
     last_metrics: Option<LastMetricsState>,
+    // Dynamic color assignment for event types
+    event_color_map: HashMap<String, Color32>,
 }
 
 const GAP_THRESHOLD_MS: f64 = 5.0;
@@ -109,13 +111,14 @@ pub enum MetricsVisualizationMode {
     Graphs, // Show vertical line graphs for metrics
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetricsEventType {
     ConnectionStarted,
     ConnectionStateUpdated,
     MetricsUpdated,
     CongestionStateUpdated,
     PacketLost,
+    Other(String),
 }
 
 impl MetricsEventType {
@@ -126,30 +129,24 @@ impl MetricsEventType {
             Self::MetricsUpdated => Color32::from_rgb(142, 68, 173),   // Purple
             Self::CongestionStateUpdated => Color32::from_rgb(255, 152, 0), // Orange
             Self::PacketLost => Color32::from_rgb(244, 67, 54),        // Red
+            Self::Other(_) => Color32::from_rgb(158, 158, 158),        // Gray
         }
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> String {
         match self {
-            Self::ConnectionStarted => "Connection Started",
-            Self::ConnectionStateUpdated => "Connection State",
-            Self::MetricsUpdated => "Metrics Updated",
-            Self::CongestionStateUpdated => "Congestion State",
-            Self::PacketLost => "Packet Lost",
+            Self::ConnectionStarted => "Connection Started".to_string(),
+            Self::ConnectionStateUpdated => "Connection State".to_string(),
+            Self::MetricsUpdated => "Metrics Updated".to_string(),
+            Self::CongestionStateUpdated => "Congestion State".to_string(),
+            Self::PacketLost => "Packet Lost".to_string(),
+            Self::Other(name) => name.clone(),
         }
     }
 
-    // Determine display style based on event type
     fn display_style(&self) -> MetricsDisplayStyle {
-        match self {
-            // Important events: display as boxes
-            Self::ConnectionStarted
-            | Self::ConnectionStateUpdated
-            | Self::CongestionStateUpdated
-            | Self::PacketLost => MetricsDisplayStyle::Box,
-            // Frequent events: display as markers
-            Self::MetricsUpdated => MetricsDisplayStyle::Marker,
-        }
+        // All events display as boxes
+        MetricsDisplayStyle::Box
     }
 }
 
@@ -220,14 +217,46 @@ impl Default for SequenceDiagram {
             overlay_graphs: true,      // Default: overlaid
             selected_metrics_event: None,
             last_metrics: None,
+            event_color_map: HashMap::new(),
         }
     }
 }
+
+// Color palette for dynamic event color assignment
+const EVENT_COLOR_PALETTE: &[Color32] = &[
+    Color32::from_rgb(231, 76, 60),   // Red
+    Color32::from_rgb(52, 152, 219),  // Blue
+    Color32::from_rgb(46, 204, 113),  // Green
+    Color32::from_rgb(155, 89, 182),  // Purple
+    Color32::from_rgb(241, 196, 15),  // Yellow
+    Color32::from_rgb(230, 126, 34),  // Orange
+    Color32::from_rgb(26, 188, 156),  // Turquoise
+    Color32::from_rgb(52, 73, 94),    // Dark blue-gray
+    Color32::from_rgb(149, 165, 166), // Gray
+    Color32::from_rgb(192, 57, 43),   // Dark red
+    Color32::from_rgb(41, 128, 185),  // Dark blue
+    Color32::from_rgb(39, 174, 96),   // Dark green
+    Color32::from_rgb(142, 68, 173),  // Dark purple
+    Color32::from_rgb(243, 156, 18),  // Dark yellow
+    Color32::from_rgb(211, 84, 0),    // Dark orange
+];
 
 impl SequenceDiagram {
     pub fn invalidate_cache(&mut self) {
         self.cache = None;
         self.rebuild_arrows = true;
+    }
+
+    /// Get or assign a color for an event type name
+    fn get_event_color(&mut self, event_name: &str) -> Color32 {
+        if let Some(&color) = self.event_color_map.get(event_name) {
+            return color;
+        }
+        // Assign next color from palette
+        let color_idx = self.event_color_map.len() % EVENT_COLOR_PALETTE.len();
+        let color = EVENT_COLOR_PALETTE[color_idx];
+        self.event_color_map.insert(event_name.to_string(), color);
+        color
     }
 
     pub fn show_single(
@@ -928,7 +957,7 @@ impl SequenceDiagram {
                     selected_file_idx,
                 );
 
-                self.draw_selection_indicator(&painter, &layout, viewport, arrow_rects.len());
+                self.draw_selection_indicator(&painter, &layout, viewport, self.arrows.len());
 
                 // Collect unique path_ids for legend
                 let mut path_ids: Vec<u64> = self
@@ -1099,7 +1128,13 @@ impl SequenceDiagram {
             let tag_x = (start_x + actual_end_x) / 2.0;
             let tag_y = (y_send_adjusted + actual_end_y) / 2.0;
 
-            draw_frame_tags(painter, &arrow.packet.frames, tag_x, tag_y, 32.0, 3);
+            draw_frame_tags(
+                painter,
+                &arrow.packet.frames,
+                Pos2::new(start_x, y_send_adjusted),
+                Pos2::new(actual_end_x, actual_end_y),
+                arrow_idx,
+            );
 
             let info_offset = if arrow.from_left { 5.0 } else { -5.0 };
             let label = if let Some(pid) = arrow.packet.path_id {
@@ -1175,7 +1210,7 @@ impl SequenceDiagram {
         recv_selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
     ) {
-        let total_arrows = arrow_rects.len();
+        let total_arrows = self.arrows.len();
 
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
@@ -1207,17 +1242,23 @@ impl SequenceDiagram {
             let new_idx = if up {
                 current_idx.saturating_sub(1)
             } else {
-                (current_idx + 1).min(total_arrows - 1)
+                (current_idx + 1).min(total_arrows.saturating_sub(1))
             };
 
             if new_idx != current_idx || self.selected_packet_idx.is_none() {
                 self.selected_packet_idx = Some(new_idx);
+                // Try to get event info from visible rects first
                 if let Some((_, sent_event_idx, recv_event_idx, from_left, _)) =
                     arrow_rects.iter().find(|(idx, _, _, _, _)| *idx == new_idx)
                 {
                     *selected_event_idx = Some(*sent_event_idx);
                     *recv_selected_event_idx = *recv_event_idx;
                     *selected_file_idx = if *from_left { 0 } else { 1 };
+                } else if let Some(arrow) = self.arrows.get(new_idx) {
+                    // Arrow not visible, get info directly from arrows list
+                    *selected_event_idx = Some(arrow.sent_event_idx);
+                    *recv_selected_event_idx = arrow.recv_event_idx;
+                    *selected_file_idx = if arrow.from_left { 0 } else { 1 };
                 }
             }
         }
@@ -1242,6 +1283,18 @@ impl SequenceDiagram {
                 Color32::YELLOW,
             );
         }
+    }
+
+    /// Get a human-readable name for an EventData variant
+    fn event_data_name(data: &EventData) -> String {
+        // Extract the variant name from Debug format
+        let debug_str = format!("{:?}", data);
+        // Take just the variant name (before any parentheses or braces)
+        debug_str
+            .split(['(', '{'])
+            .next()
+            .unwrap_or("Unknown")
+            .to_string()
     }
 
     /// Extract path_id from event - handles both multipath and regular formats
@@ -1334,14 +1387,16 @@ impl SequenceDiagram {
             let metrics_event = match &event.data {
                 EventData::ConnectionStarted(_) => {
                     let event_type = MetricsEventType::ConnectionStarted;
+                    let color = event_type.color();
+                    let display_style = event_type.display_style();
                     Some(MetricsEvent {
                         time: event.time as f64,
                         event_type,
                         display_text: "connection started".to_string(),
                         detail_text: format!("Connection initiated at {:.3}ms", event.time),
-                        color: event_type.color(),
+                        color,
                         event_idx: idx,
-                        display_style: event_type.display_style(),
+                        display_style,
                         file_idx,
                         path_id,
                         smoothed_rtt: None,
@@ -1408,14 +1463,16 @@ impl SequenceDiagram {
                         if !self.show_all_metrics && !is_significant {
                             None
                         } else {
+                            let color = event_type.color();
+                            let display_style = event_type.display_style();
                             Some(MetricsEvent {
                                 time: event.time as f64,
                                 event_type,
                                 display_text: display,
                                 detail_text: detail,
-                                color: event_type.color(),
+                                color,
                                 event_idx: idx,
-                                display_style: event_type.display_style(),
+                                display_style,
                                 file_idx,
                                 path_id: data.path_id,
                                 smoothed_rtt: data.smoothed_rtt,
@@ -1429,6 +1486,8 @@ impl SequenceDiagram {
 
                 EventData::CongestionStateUpdated(data) => {
                     let event_type = MetricsEventType::CongestionStateUpdated;
+                    let color = event_type.color();
+                    let display_style = event_type.display_style();
                     Some(MetricsEvent {
                         time: event.time as f64,
                         event_type,
@@ -1437,9 +1496,9 @@ impl SequenceDiagram {
                             "Congestion state changed to {:?} at {:.3}ms",
                             data.new, event.time
                         ),
-                        color: event_type.color(),
+                        color,
                         event_idx: idx,
-                        display_style: event_type.display_style(),
+                        display_style,
                         file_idx,
                         path_id: data.path_id,
                         smoothed_rtt: None,
@@ -1449,14 +1508,16 @@ impl SequenceDiagram {
 
                 EventData::ConnectionStateUpdated(data) => {
                     let event_type = MetricsEventType::ConnectionStateUpdated;
+                    let color = event_type.color();
+                    let display_style = event_type.display_style();
                     Some(MetricsEvent {
                         time: event.time as f64,
                         event_type,
                         display_text: format!("{:?}", data.new),
                         detail_text: format!("Connection state: {:?}", data.new),
-                        color: event_type.color(),
+                        color,
                         event_idx: idx,
-                        display_style: event_type.display_style(),
+                        display_style,
                         file_idx,
                         path_id,
                         smoothed_rtt: None,
@@ -1468,14 +1529,16 @@ impl SequenceDiagram {
                     if let Some(header) = &data.header {
                         if let Some(pn) = header.packet_number {
                             let event_type = MetricsEventType::PacketLost;
+                            let color = event_type.color();
+                            let display_style = event_type.display_style();
                             Some(MetricsEvent {
                                 time: event.time as f64,
                                 event_type,
                                 display_text: format!("lost PN {}", pn),
                                 detail_text: format!("Packet {} lost at {:.3}ms", pn, event.time),
-                                color: event_type.color(),
+                                color,
                                 event_idx: idx,
-                                display_style: event_type.display_style(),
+                                display_style,
                                 file_idx,
                                 path_id,
                                 smoothed_rtt: None,
@@ -1489,7 +1552,29 @@ impl SequenceDiagram {
                     }
                 }
 
-                _ => None,
+                // Skip packet events (already rendered as arrows)
+                EventData::PacketSent(_) | EventData::PacketReceived(_) => None,
+
+                // Render all other events as boxes
+                other => {
+                    let event_name = Self::event_data_name(other);
+                    let color = self.get_event_color(&event_name);
+                    let event_type = MetricsEventType::Other(event_name.clone());
+                    let display_style = event_type.display_style();
+                    Some(MetricsEvent {
+                        time: event.time as f64,
+                        event_type,
+                        display_text: event_name,
+                        detail_text: format!("{:?}", other),
+                        color,
+                        event_idx: idx,
+                        display_style,
+                        file_idx,
+                        path_id,
+                        smoothed_rtt: None,
+                        bytes_in_flight: None,
+                    })
+                }
             };
 
             if let Some(event) = metrics_event {
@@ -1616,7 +1701,7 @@ impl SequenceDiagram {
     ) {
         const BOX_WIDTH: f32 = 140.0;
         const BOX_PADDING: f32 = 6.0;
-        const MARGIN_FROM_TIMELINE: f32 = 50.0;
+        const MARGIN_FROM_TIMELINE: f32 = 20.0;
 
         for event in events {
             let y = time_to_y(event.time);
@@ -1630,21 +1715,42 @@ impl SequenceDiagram {
 
             let box_height = text_galley.size().y + BOX_PADDING * 2.0;
 
-            // Position boxes to the left of the left timeline
-            let box_x = layout.left_x - BOX_WIDTH - MARGIN_FROM_TIMELINE;
+            // Position boxes based on which file the event came from
+            let box_x = if event.file_idx == 0 {
+                // Left file: position to the left of the left timeline
+                layout.left_x - BOX_WIDTH - MARGIN_FROM_TIMELINE
+            } else {
+                // Right file: position to the right of the right timeline
+                layout.right_x + MARGIN_FROM_TIMELINE
+            };
 
             let rect = Rect::from_min_size(
                 Pos2::new(box_x, y - box_height / 2.0),
                 Vec2::new(BOX_WIDTH, box_height),
             );
 
+            // Check if this event is selected
+            let is_selected = self.selected_metrics_event == Some(event.event_idx);
+
             painter.rect_filled(rect, 4.0, event.color);
-            painter.rect_stroke(
-                rect,
-                4.0,
-                Stroke::new(1.0, Color32::WHITE.linear_multiply(0.5)),
-                StrokeKind::Inside,
-            );
+
+            // Draw highlight for selected event
+            if is_selected {
+                // Draw a bright yellow border for selection
+                painter.rect_stroke(
+                    rect,
+                    4.0,
+                    Stroke::new(3.0, Color32::YELLOW),
+                    StrokeKind::Outside,
+                );
+            } else {
+                painter.rect_stroke(
+                    rect,
+                    4.0,
+                    Stroke::new(1.0, Color32::WHITE.linear_multiply(0.5)),
+                    StrokeKind::Inside,
+                );
+            }
 
             // Draw text
             painter.text(
@@ -1658,11 +1764,17 @@ impl SequenceDiagram {
             // Add click interaction
             let response = ui.interact(
                 rect,
-                ui.id().with(("metrics_box", event.event_idx)),
+                ui.id()
+                    .with(("metrics_box", event.event_idx, event.file_idx)),
                 Sense::click(),
             );
             if response.clicked() {
-                self.selected_metrics_event = Some(event.event_idx);
+                // Toggle selection: click again to deselect
+                if is_selected {
+                    self.selected_metrics_event = None;
+                } else {
+                    self.selected_metrics_event = Some(event.event_idx);
+                }
             }
         }
 
@@ -1697,7 +1809,12 @@ impl SequenceDiagram {
 
         for event in events {
             let y = time_to_y(event.time);
-            let x = layout.left_x - MARKER_OFFSET;
+            // Position markers based on which file the event came from
+            let x = if event.file_idx == 0 {
+                layout.left_x - MARKER_OFFSET
+            } else {
+                layout.right_x + MARKER_OFFSET
+            };
 
             let center = Pos2::new(x, y);
 
@@ -1718,7 +1835,8 @@ impl SequenceDiagram {
             let rect = Rect::from_center_size(center, Vec2::splat(MARKER_SIZE * 2.0));
             let response = ui.interact(
                 rect,
-                ui.id().with(("metrics_marker", event.event_idx)),
+                ui.id()
+                    .with(("metrics_marker", event.event_idx, event.file_idx)),
                 Sense::hover(),
             );
 
@@ -2591,31 +2709,146 @@ fn draw_gap_indicators<F>(
 fn draw_frame_tags(
     painter: &Painter,
     frames: &[FrameType],
-    mid_x: f32,
-    mid_y: f32,
-    tag_width: f32,
-    max_tags: usize,
+    line_start: Pos2,
+    line_end: Pos2,
+    arrow_idx: usize,
 ) {
-    let frames_to_show: Vec<&FrameType> = frames.iter().take(max_tags).collect();
-    let tag_gap = 3.0;
-    let tag_height = 16.0;
-    let total_width = frames_to_show.len() as f32 * (tag_width + tag_gap);
-    let start_x = mid_x - total_width / 2.0;
+    if frames.is_empty() {
+        return;
+    }
 
-    for (i, frame) in frames_to_show.iter().enumerate() {
-        let tag_x = start_x + (i as f32 * (tag_width + tag_gap));
-        let tag_rect = Rect::from_min_size(
-            Pos2::new(tag_x, mid_y - tag_height / 2.0),
-            Vec2::new(tag_width, tag_height),
-        );
-        painter.rect_filled(tag_rect, 2.0, frame.color());
-        painter.text(
-            tag_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            frame.short_name(),
-            egui::FontId::proportional(11.0),
-            Color32::WHITE,
-        );
+    // Group frames by type and count duplicates
+    let mut grouped: Vec<(&FrameType, usize)> = Vec::new();
+    for frame in frames {
+        if let Some(last) = grouped.last_mut() {
+            if last.0.display_name() == frame.display_name() {
+                last.1 += 1;
+                continue;
+            }
+        }
+        grouped.push((frame, 1));
+    }
+
+    // Calculate line properties
+    let dx = line_end.x - line_start.x;
+    let dy = line_end.y - line_start.y;
+    let line_len = (dx * dx + dy * dy).sqrt();
+    if line_len < 1.0 {
+        return;
+    }
+
+    // Unit vector along the line
+    let ux = dx / line_len;
+    let uy = dy / line_len;
+
+    // Perpendicular vector (for row offset)
+    // Positive = "above" the line (in screen coords, depends on line direction)
+    let px = -uy;
+    let py = ux;
+
+    let tag_height = 14.0;
+    let tag_gap = 4.0;
+
+    // Calculate tag widths based on content
+    let tag_data: Vec<(String, Color32, f32)> = grouped
+        .iter()
+        .map(|(frame, count)| {
+            let text = if *count > 1 {
+                format!("{} x{}", frame.display_name(), count)
+            } else {
+                frame.display_name()
+            };
+            // Estimate width based on text length
+            let width = (text.len() as f32 * 6.0 + 12.0).clamp(50.0, 120.0);
+            (text, frame.color(), width)
+        })
+        .collect();
+
+    let num_tags = tag_data.len();
+
+    // Calculate total width needed
+    let total_width: f32 = tag_data.iter().map(|(_, _, w)| w + tag_gap).sum::<f32>() - tag_gap;
+
+    // Center point of the line
+    let mid_x = (line_start.x + line_end.x) / 2.0;
+    let mid_y = (line_start.y + line_end.y) / 2.0;
+
+    // Alternate perpendicular offset based on arrow index to reduce overlap
+    // Even-indexed arrows get tags on one side, odd-indexed on the other
+    let base_perp_offset = if arrow_idx % 2 == 0 { -14.0 } else { 14.0 };
+
+    // Calculate how many tags fit per row
+    let available_len = line_len * 0.8;
+    let fits_in_one_row = total_width <= available_len;
+
+    let row_spacing = tag_height + 2.0;
+
+    if fits_in_one_row || num_tags <= 2 {
+        // Single row layout
+        let start_offset = -total_width / 2.0;
+        let mut current_offset = start_offset;
+
+        for (text, color, width) in &tag_data {
+            let along_offset = current_offset + width / 2.0;
+
+            let tag_center_x = mid_x + along_offset * ux + base_perp_offset * px;
+            let tag_center_y = mid_y + along_offset * uy + base_perp_offset * py;
+
+            let tag_rect = Rect::from_center_size(
+                Pos2::new(tag_center_x, tag_center_y),
+                Vec2::new(*width, tag_height),
+            );
+
+            painter.rect_filled(tag_rect, 2.0, *color);
+            painter.text(
+                tag_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(8.0),
+                Color32::WHITE,
+            );
+
+            current_offset += width + tag_gap;
+        }
+    } else {
+        // Two row layout
+        let half = num_tags.div_ceil(2);
+        let rows: Vec<&[(String, Color32, f32)]> = vec![&tag_data[..half], &tag_data[half..]];
+
+        for (row_idx, row_tags) in rows.iter().enumerate() {
+            let row_width: f32 =
+                row_tags.iter().map(|(_, _, w)| w + tag_gap).sum::<f32>() - tag_gap;
+            let start_offset = -row_width / 2.0;
+            let mut current_offset = start_offset;
+
+            let row_perp_offset = base_perp_offset
+                + (row_idx as f32 - 0.5)
+                    * row_spacing
+                    * if arrow_idx % 2 == 0 { -1.0 } else { 1.0 };
+
+            for (text, color, width) in *row_tags {
+                let along_offset = current_offset + width / 2.0;
+
+                let tag_center_x = mid_x + along_offset * ux + row_perp_offset * px;
+                let tag_center_y = mid_y + along_offset * uy + row_perp_offset * py;
+
+                let tag_rect = Rect::from_center_size(
+                    Pos2::new(tag_center_x, tag_center_y),
+                    Vec2::new(*width, tag_height),
+                );
+
+                painter.rect_filled(tag_rect, 2.0, *color);
+                painter.text(
+                    tag_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    text,
+                    egui::FontId::proportional(8.0),
+                    Color32::WHITE,
+                );
+
+                current_offset += width + tag_gap;
+            }
+        }
     }
 }
 

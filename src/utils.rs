@@ -188,26 +188,43 @@ impl FrameType {
     /// Color for rendering this frame type.
     pub fn color(&self) -> Color32 {
         match self {
-            Self::Stream(_) => Color32::from_rgb(255, 80, 80),
-            Self::Crypto => Color32::from_rgb(128, 0, 128),
-            Self::Ack | Self::ImmediateAck => Color32::from_rgb(0, 128, 0),
-            Self::Padding => Color32::from_rgb(255, 165, 0),
+            Self::Stream(_) => Color32::from_rgb(255, 80, 80), // Red
+            Self::Crypto => Color32::from_rgb(128, 0, 128),    // Purple
+            Self::Ack | Self::ImmediateAck => Color32::from_rgb(0, 128, 0), // Green
+            Self::Padding => Color32::from_rgb(255, 165, 0),   // Orange
+            Self::Ping => Color32::from_rgb(0, 191, 255),      // Deep sky blue
+            Self::ResetStream => Color32::from_rgb(220, 20, 60), // Crimson
+            Self::StopSending => Color32::from_rgb(178, 34, 34), // Firebrick
+            Self::NewToken => Color32::from_rgb(255, 215, 0),  // Gold
             Self::MaxData | Self::MaxStreamData | Self::MaxStreams => {
-                Color32::from_rgb(100, 150, 200)
+                Color32::from_rgb(100, 150, 200) // Steel blue
             }
-            Self::HandshakeDone => Color32::from_rgb(50, 150, 50),
-            Self::NewConnectionId | Self::RetireConnectionId => Color32::from_rgb(200, 100, 50),
-            Self::ConnectionClose => Color32::from_rgb(255, 100, 100),
-            Self::AckFrequency => Color32::from_rgb(200, 150, 50),
-            Self::ObservedAddress => {
-                // QAD
-                Color32::from_rgb(200, 0, 50)
+            Self::DataBlocked | Self::StreamDataBlocked | Self::StreamsBlocked => {
+                Color32::from_rgb(255, 99, 71) // Tomato
             }
+            Self::HandshakeDone => Color32::from_rgb(50, 150, 50), // Forest green
+            Self::NewConnectionId | Self::RetireConnectionId => Color32::from_rgb(200, 100, 50), // Sienna
+            Self::ConnectionClose => Color32::from_rgb(255, 100, 100), // Light red
+            Self::AckFrequency => Color32::from_rgb(200, 150, 50),     // Dark goldenrod
+            Self::Datagram => Color32::from_rgb(138, 43, 226),         // Blue violet
+            // Path-related frames (multipath)
+            Self::PathChallenge => Color32::from_rgb(70, 130, 180), // Steel blue
+            Self::PathResponse => Color32::from_rgb(60, 179, 113),  // Medium sea green
+            Self::PathAck => Color32::from_rgb(46, 139, 87),        // Sea green
+            Self::PathAbandon => Color32::from_rgb(199, 21, 133),   // Medium violet red
+            Self::PathStatusAvailable => Color32::from_rgb(32, 178, 170), // Light sea green
+            Self::PathStatusBackup => Color32::from_rgb(0, 139, 139), // Dark cyan
+            Self::PathNewConnectionId => Color32::from_rgb(255, 140, 0), // Dark orange
+            Self::PathRetireConnectionId => Color32::from_rgb(210, 105, 30), // Chocolate
+            Self::PathsBlocked => Color32::from_rgb(219, 112, 147), // Pale violet red
+            Self::PathCidsBlocked => Color32::from_rgb(176, 48, 96), // Maroon
+            Self::MaxPathId => Color32::from_rgb(72, 61, 139),      // Dark slate blue
+            // Address-related frames
+            Self::ObservedAddress => Color32::from_rgb(200, 0, 50), // Dark red
             Self::AddAddress | Self::RemoveAddress | Self::ReachOut => {
-                // QNT
-                Color32::from_rgb(200, 50, 50)
+                Color32::from_rgb(200, 50, 50) // Indian red
             }
-            _ => Color32::from_rgb(100, 100, 100),
+            Self::Custom(_) => Color32::from_rgb(147, 112, 219), // Medium purple
         }
     }
 
