@@ -596,6 +596,14 @@ impl QlogViewerApp {
             }
         }
 
+        // Render transport parameters for ParametersSet events
+        if let EventData::ParametersSet(ref params) = event.data {
+            ui.add_space(5.);
+            ui.separator();
+            ui.add_space(5.);
+            render_transport_parameters(ui, params, id_prefix, idx);
+        }
+
         if event.data.contains_quic_frames().is_some() {
             ui.add_space(5.);
             ui.separator();
@@ -1603,5 +1611,170 @@ fn render_inner_header(ui: &mut egui::Ui, header: &PacketHeader) {
     }
     if let Some(pid) = header.path_id {
         ui.label(format!("Path Id: {pid}"));
+    }
+}
+
+fn render_transport_parameters(
+    ui: &mut egui::Ui,
+    params: &qlog::events::quic::ParametersSet,
+    id_prefix: &str,
+    idx: usize,
+) {
+    ui.heading("Transport Parameters");
+
+    // Initiator
+    if let Some(ref initiator) = params.initiator {
+        ui.label(format!("Initiator: {:?}", initiator));
+    }
+
+    // Connection IDs section
+    CollapsingHeader::new("Connection IDs")
+        .id_salt(format!("{}-params-cids-{}", id_prefix, idx))
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(ref cid) = params.original_destination_connection_id {
+                ui.label(format!("Original DCID: {}", cid));
+            }
+            if let Some(ref cid) = params.initial_source_connection_id {
+                ui.label(format!("Initial SCID: {}", cid));
+            }
+            if let Some(ref cid) = params.retry_source_connection_id {
+                ui.label(format!("Retry SCID: {}", cid));
+            }
+            if let Some(ref token) = params.stateless_reset_token {
+                ui.label(format!("Stateless Reset Token: {}", token));
+            }
+            if let Some(limit) = params.active_connection_id_limit {
+                ui.label(format!("Active CID Limit: {}", limit));
+            }
+        });
+
+    // Flow Control section
+    CollapsingHeader::new("Flow Control")
+        .id_salt(format!("{}-params-flow-{}", id_prefix, idx))
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(v) = params.initial_max_data {
+                ui.label(format!("Initial Max Data: {}", utils::format_bytes(v)));
+            }
+            if let Some(v) = params.initial_max_stream_data_bidi_local {
+                ui.label(format!(
+                    "Max Stream Data (bidi local): {}",
+                    utils::format_bytes(v)
+                ));
+            }
+            if let Some(v) = params.initial_max_stream_data_bidi_remote {
+                ui.label(format!(
+                    "Max Stream Data (bidi remote): {}",
+                    utils::format_bytes(v)
+                ));
+            }
+            if let Some(v) = params.initial_max_stream_data_uni {
+                ui.label(format!("Max Stream Data (uni): {}", utils::format_bytes(v)));
+            }
+            if let Some(v) = params.initial_max_streams_bidi {
+                ui.label(format!("Max Streams (bidi): {}", v));
+            }
+            if let Some(v) = params.initial_max_streams_uni {
+                ui.label(format!("Max Streams (uni): {}", v));
+            }
+        });
+
+    // Timing section
+    CollapsingHeader::new("Timing")
+        .id_salt(format!("{}-params-timing-{}", id_prefix, idx))
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(v) = params.max_idle_timeout {
+                ui.label(format!("Max Idle Timeout: {}ms", v));
+            }
+            if let Some(v) = params.max_ack_delay {
+                ui.label(format!("Max ACK Delay: {}ms", v));
+            }
+            if let Some(v) = params.ack_delay_exponent {
+                ui.label(format!("ACK Delay Exponent: {}", v));
+            }
+            if let Some(v) = params.min_ack_delay {
+                ui.label(format!("Min ACK Delay: {}µs", v));
+            }
+        });
+
+    // Network section
+    CollapsingHeader::new("Network")
+        .id_salt(format!("{}-params-network-{}", id_prefix, idx))
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(v) = params.max_udp_payload_size {
+                ui.label(format!("Max UDP Payload: {} bytes", v));
+            }
+            if let Some(v) = params.max_datagram_frame_size {
+                ui.label(format!("Max Datagram Frame: {} bytes", v));
+            }
+            if let Some(v) = params.disable_active_migration {
+                ui.label(format!("Disable Active Migration: {}", v));
+            }
+            if let Some(ref addr) = params.preferred_address {
+                ui.label(format!("Preferred Address: {:?}", addr));
+            }
+        });
+
+    // Extensions section
+    let has_extensions = params.initial_max_path_id.is_some()
+        || params.max_remote_nat_traversal_addresses.is_some()
+        || params.grease_quic_bit.is_some()
+        || params.address_discovery.is_some();
+
+    if has_extensions {
+        CollapsingHeader::new("Extensions")
+            .id_salt(format!("{}-params-ext-{}", id_prefix, idx))
+            .default_open(true)
+            .show(ui, |ui| {
+                if let Some(v) = params.initial_max_path_id {
+                    ui.label(format!("Initial Max Path ID: {} (Multipath)", v));
+                }
+                if let Some(v) = params.max_remote_nat_traversal_addresses {
+                    ui.label(format!("Max NAT Traversal Addrs: {}", v));
+                }
+                if let Some(v) = params.grease_quic_bit {
+                    ui.label(format!("GREASE QUIC Bit: {}", v));
+                }
+                if let Some(ref role) = params.address_discovery {
+                    ui.label(format!("Address Discovery: {:?}", role));
+                }
+            });
+    }
+
+    // TLS section
+    let has_tls = params.resumption_allowed.is_some()
+        || params.early_data_enabled.is_some()
+        || params.tls_cipher.is_some();
+
+    if has_tls {
+        CollapsingHeader::new("TLS")
+            .id_salt(format!("{}-params-tls-{}", id_prefix, idx))
+            .default_open(false)
+            .show(ui, |ui| {
+                if let Some(v) = params.resumption_allowed {
+                    ui.label(format!("Resumption Allowed: {}", v));
+                }
+                if let Some(v) = params.early_data_enabled {
+                    ui.label(format!("0-RTT Enabled: {}", v));
+                }
+                if let Some(ref cipher) = params.tls_cipher {
+                    ui.label(format!("TLS Cipher: {}", cipher));
+                }
+            });
+    }
+
+    // Unknown parameters
+    if !params.unknown_parameters.is_empty() {
+        CollapsingHeader::new("Unknown Parameters")
+            .id_salt(format!("{}-params-unknown-{}", id_prefix, idx))
+            .default_open(false)
+            .show(ui, |ui| {
+                for param in &params.unknown_parameters {
+                    ui.label(format!("ID 0x{:x}: {}", param.id, param.value));
+                }
+            });
     }
 }
