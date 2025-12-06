@@ -15,6 +15,7 @@ pub struct CongestionGraph {
     show_latest_rtt: bool,
     show_min_rtt: bool,
     show_congestion_states: bool,
+    show_ecn_states: bool,
     show_time_gaps: bool,
     time_gap_threshold_ms: f32,
     selected_path_id: u64,
@@ -32,6 +33,7 @@ impl CongestionGraph {
             show_latest_rtt: true,
             show_min_rtt: true,
             show_congestion_states: true,
+            show_ecn_states: false,
             show_time_gaps: false,
             time_gap_threshold_ms: 50.0,
             selected_path_id: 0,
@@ -90,6 +92,7 @@ impl CongestionGraph {
             ui.checkbox(&mut self.show_bytes_in_flight, "In Flight");
             ui.separator();
             ui.checkbox(&mut self.show_congestion_states, "CC States");
+            ui.checkbox(&mut self.show_ecn_states, "ECN");
             ui.checkbox(&mut self.show_time_gaps, "Time Gaps");
             if self.show_time_gaps {
                 ui.add(
@@ -130,6 +133,21 @@ impl CongestionGraph {
                     ];
                     let polygon = Polygon::new(period.state.name(), PlotPoints::from(points))
                         .fill_color(period.state.color())
+                        .stroke(egui::Stroke::NONE);
+                    plot_ui.polygon(polygon);
+                }
+            }
+
+            if self.show_ecn_states {
+                for period in &correlation.ecn_states {
+                    let points = vec![
+                        [period.start_time as f64, 0.0],
+                        [period.start_time as f64, max_y],
+                        [period.end_time as f64, max_y],
+                        [period.end_time as f64, 0.0],
+                    ];
+                    let polygon = Polygon::new(period.name(), PlotPoints::from(points))
+                        .fill_color(period.color())
                         .stroke(egui::Stroke::NONE);
                     plot_ui.polygon(polygon);
                 }

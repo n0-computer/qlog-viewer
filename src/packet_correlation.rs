@@ -1,5 +1,5 @@
 use crate::qlog_data::QlogData;
-use qlog::events::quic::{AckedRanges, QuicFrame};
+use qlog::events::quic::{AckedRanges, EcnState, QuicFrame};
 use qlog::events::EventData;
 use std::collections::HashMap;
 
@@ -74,6 +74,33 @@ pub struct CongestionPeriod {
     pub end_time: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct EcnPeriod {
+    pub state: EcnState,
+    pub start_time: f32,
+    pub end_time: f32,
+}
+
+impl EcnPeriod {
+    pub fn color(&self) -> egui::Color32 {
+        match self.state {
+            EcnState::Testing => egui::Color32::from_rgba_unmultiplied(255, 200, 0, 40),
+            EcnState::Capable => egui::Color32::from_rgba_unmultiplied(0, 200, 100, 40),
+            EcnState::Failed => egui::Color32::from_rgba_unmultiplied(255, 50, 50, 40),
+            EcnState::Unknown => egui::Color32::from_rgba_unmultiplied(128, 128, 128, 20),
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self.state {
+            EcnState::Testing => "ECN Testing",
+            EcnState::Capable => "ECN Capable",
+            EcnState::Failed => "ECN Failed",
+            EcnState::Unknown => "ECN Unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PacketCorrelation {
     // Key: (path_id, packet_type, packet_number)
@@ -83,6 +110,7 @@ pub struct PacketCorrelation {
     pub reorderings: Vec<ReorderEvent>,
     pub time_gaps: Vec<TimeGap>,
     pub congestion_states: Vec<CongestionPeriod>,
+    pub ecn_states: Vec<EcnPeriod>,
     pub min_time: f32,
     pub max_time: f32,
 }
@@ -104,6 +132,7 @@ impl PacketCorrelation {
         correlation.detect_reorderings(qlog);
         correlation.detect_time_gaps(qlog, DEFAULT_GAP_THRESHOLD_MS);
         correlation.extract_congestion_states(qlog);
+        correlation.extract_ecn_states(qlog);
 
         correlation
     }
@@ -289,6 +318,34 @@ impl PacketCorrelation {
         if current_state != CongestionState::Unknown {
             self.congestion_states.push(CongestionPeriod {
                 state: current_state,
+                start_time: state_start_time,
+                end_time: self.max_time,
+            });
+        }
+    }
+
+    fn extract_ecn_states(&mut self, qlog: &QlogData) {
+        let mut current_state: Option<EcnState> = None;
+        let mut state_start_time = self.min_time;
+
+        for event in qlog.events.iter() {
+            if let EventData::EcnStateUpdated(data) = &event.data {
+                if let Some(ref state) = current_state {
+                    self.ecn_states.push(EcnPeriod {
+                        state: state.clone(),
+                        start_time: state_start_time,
+                        end_time: event.time,
+                    });
+                }
+
+                current_state = Some(data.new.clone());
+                state_start_time = event.time;
+            }
+        }
+
+        if let Some(ref state) = current_state {
+            self.ecn_states.push(EcnPeriod {
+                state: state.clone(),
                 start_time: state_start_time,
                 end_time: self.max_time,
             });

@@ -210,6 +210,14 @@ impl QlogData {
             EventData::FramesProcessed(d) => {
                 format!("Frames: {}", d.frames.len())
             }
+            EventData::TimerUpdated(d) => {
+                format!("Timer: {:?} {:?}", d.timer_type, d.event_type)
+            }
+            EventData::ParametersRestored(_) => "Restored params".to_string(),
+            EventData::RecoveryParametersSet(_) => "Recovery params".to_string(),
+            EventData::EcnStateUpdated(d) => {
+                format!("ECN: {:?} -> {:?}", d.old, d.new)
+            }
             _ => String::new(),
         }
     }

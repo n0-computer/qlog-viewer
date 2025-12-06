@@ -8,7 +8,7 @@ use crate::stats_view::StatsView;
 use crate::utils::{self, FrameType};
 use egui::text::LayoutJob;
 use egui::{
-    CentralPanel, CollapsingHeader, Context, FontFamily, FontId, SidePanel, TextFormat,
+    CentralPanel, CollapsingHeader, Context, FontFamily, FontId, RichText, SidePanel, TextFormat,
     TopBottomPanel,
 };
 use qlog::events::quic::PacketHeader;
@@ -595,13 +595,56 @@ impl QlogViewerApp {
                 ui.label(format!("[EX] {key}: {value}"));
             }
         }
-
-        // Render transport parameters for ParametersSet events
-        if let EventData::ParametersSet(ref params) = event.data {
-            ui.add_space(5.);
-            ui.separator();
-            ui.add_space(5.);
-            render_transport_parameters(ui, params, id_prefix, idx);
+        match event.data {
+            EventData::ParametersSet(ref params) => {
+                ui.add_space(5.);
+                ui.separator();
+                ui.add_space(5.);
+                render_transport_parameters(ui, params, id_prefix, idx);
+            }
+            EventData::ParametersRestored(ref params) => {
+                ui.add_space(5.);
+                ui.separator();
+                ui.add_space(5.);
+                render_parameters_restored(ui, params);
+            }
+            EventData::RecoveryParametersSet(ref params) => {
+                ui.add_space(5.);
+                ui.separator();
+                ui.add_space(5.);
+                render_recovery_parameters(ui, params);
+            }
+            EventData::MetricsUpdated(ref params) => {
+                ui.add_space(5.);
+                ui.separator();
+                ui.add_space(5.);
+                render_recovery_metrics_updated(ui, params);
+            }
+            EventData::TimerUpdated(ref timer) => {
+                ui.add_space(5.);
+                ui.separator();
+                ui.add_space(5.);
+                render_timer_updated(ui, timer);
+            }
+            EventData::EcnStateUpdated(ref ecn) => {
+                ui.add_space(5.);
+                ui.separator();
+                ui.add_space(5.);
+                render_ecn_state_updated(ui, ecn);
+            }
+            EventData::ConnectionStarted(ref started) => {
+                ui.add_space(5.);
+                ui.separator();
+                ui.add_space(5.);
+                render_connection_started(ui, started, id_prefix, idx)
+            }
+            EventData::TupleAssigned(ref tuple) => {
+                ui.add_space(5.);
+                ui.separator();
+                ui.add_space(5.);
+                render_tuple_assigned(ui, tuple, id_prefix, idx)
+            }
+            _ => {}
         }
 
         if event.data.contains_quic_frames().is_some() {
@@ -826,20 +869,22 @@ impl QlogViewerApp {
 
 impl eframe::App for QlogViewerApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // Handle number key shortcuts for view switching
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::Num1) {
-                self.view_mode = ViewMode::EventList;
-            } else if i.key_pressed(egui::Key::Num2) {
-                self.view_mode = ViewMode::SequenceDiagram;
-            } else if i.key_pressed(egui::Key::Num3) {
-                self.view_mode = ViewMode::CongestionGraph;
-            } else if i.key_pressed(egui::Key::Num4) {
-                self.view_mode = ViewMode::PacketizationDiagram;
-            } else if i.key_pressed(egui::Key::Num5) {
-                self.view_mode = ViewMode::StatsView;
-            }
-        });
+        // Handle number key shortcuts for view switching (only when no text input is focused)
+        if !ctx.wants_keyboard_input() {
+            ctx.input(|i| {
+                if i.key_pressed(egui::Key::Num1) {
+                    self.view_mode = ViewMode::EventList;
+                } else if i.key_pressed(egui::Key::Num2) {
+                    self.view_mode = ViewMode::SequenceDiagram;
+                } else if i.key_pressed(egui::Key::Num3) {
+                    self.view_mode = ViewMode::CongestionGraph;
+                } else if i.key_pressed(egui::Key::Num4) {
+                    self.view_mode = ViewMode::PacketizationDiagram;
+                } else if i.key_pressed(egui::Key::Num5) {
+                    self.view_mode = ViewMode::StatsView;
+                }
+            });
+        }
 
         self.render_menu_bar(ctx);
         self.render_event_detail(ctx);
@@ -1774,6 +1819,226 @@ fn render_transport_parameters(
             .show(ui, |ui| {
                 for param in &params.unknown_parameters {
                     ui.label(format!("ID 0x{:x}: {}", param.id, param.value));
+                }
+            });
+    }
+}
+
+fn render_parameters_restored(ui: &mut egui::Ui, params: &qlog::events::quic::ParametersRestored) {
+    ui.heading("Restored Parameters (0-RTT)");
+
+    if let Some(v) = params.max_idle_timeout {
+        ui.label(format!("Max Idle Timeout: {}ms", v));
+    }
+    if let Some(v) = params.max_udp_payload_size {
+        ui.label(format!("Max UDP Payload: {} bytes", v));
+    }
+    if let Some(v) = params.active_connection_id_limit {
+        ui.label(format!("Active CID Limit: {}", v));
+    }
+    if let Some(v) = params.initial_max_data {
+        ui.label(format!("Initial Max Data: {}", utils::format_bytes(v)));
+    }
+    if let Some(v) = params.initial_max_stream_data_bidi_local {
+        ui.label(format!(
+            "Max Stream Data (bidi local): {}",
+            utils::format_bytes(v)
+        ));
+    }
+    if let Some(v) = params.initial_max_stream_data_bidi_remote {
+        ui.label(format!(
+            "Max Stream Data (bidi remote): {}",
+            utils::format_bytes(v)
+        ));
+    }
+    if let Some(v) = params.initial_max_stream_data_uni {
+        ui.label(format!("Max Stream Data (uni): {}", utils::format_bytes(v)));
+    }
+    if let Some(v) = params.initial_max_streams_bidi {
+        ui.label(format!("Max Streams (bidi): {}", v));
+    }
+    if let Some(v) = params.initial_max_streams_uni {
+        ui.label(format!("Max Streams (uni): {}", v));
+    }
+    if let Some(v) = params.disable_active_migration {
+        ui.label(format!("Disable Active Migration: {}", v));
+    }
+    if let Some(v) = params.max_datagram_frame_size {
+        ui.label(format!("Max Datagram Frame: {} bytes", v));
+    }
+    if let Some(v) = params.grease_quic_bit {
+        ui.label(format!("GREASE QUIC Bit: {}", v));
+    }
+}
+
+fn render_recovery_parameters(
+    ui: &mut egui::Ui,
+    params: &qlog::events::quic::RecoveryParametersSet,
+) {
+    ui.heading("Recovery Parameters");
+
+    if let Some(v) = params.reordering_threshold {
+        ui.label(format!("Reordering Threshold: {}", v));
+    }
+    if let Some(v) = params.time_threshold {
+        ui.label(format!("Time Threshold: {:.2}", v));
+    }
+    if let Some(v) = params.timer_granularity {
+        ui.label(format!("Timer Granularity: {}ms", v));
+    }
+    if let Some(v) = params.initial_rtt {
+        ui.label(format!("Initial RTT: {:.2}ms", v));
+    }
+    if let Some(v) = params.max_datagram_size {
+        ui.label(format!("Max Datagram Size: {} bytes", v));
+    }
+    if let Some(v) = params.initial_congestion_window {
+        ui.label(format!("Initial CWND: {}", utils::format_bytes(v)));
+    }
+    if let Some(v) = params.minimum_congestion_window {
+        ui.label(format!("Min CWND: {} bytes", v));
+    }
+    if let Some(v) = params.loss_reduction_factor {
+        ui.label(format!("Loss Reduction Factor: {:.2}", v));
+    }
+    if let Some(v) = params.persistent_congestion_threshold {
+        ui.label(format!("Persistent Congestion Threshold: {}", v));
+    }
+}
+
+fn render_recovery_metrics_updated(
+    ui: &mut egui::Ui,
+    params: &qlog::events::quic::RecoveryMetricsUpdated,
+) {
+    ui.heading("Recovery Metrics Updated");
+
+    if let Some(v) = params.path_id {
+        ui.label(format!("Path Id: {}", v));
+    }
+
+    if let Some(v) = params.min_rtt {
+        ui.label(format!("Min Rtt: {}", v));
+    }
+    if let Some(v) = params.smoothed_rtt {
+        ui.label(format!("Smoothed Rtt: {}", v));
+    }
+    if let Some(v) = params.latest_rtt {
+        ui.label(format!("Latest Rtt: {}", v));
+    }
+    if let Some(v) = params.rtt_variance {
+        ui.label(format!("Rtt Variance: {}", v));
+    }
+    if let Some(v) = params.pto_count {
+        ui.label(format!("PTO Count: {}", v));
+    }
+    if let Some(v) = params.congestion_window {
+        ui.label(format!("Congestion Window: {}", v));
+    }
+    if let Some(v) = params.bytes_in_flight {
+        ui.label(format!("Bytes in Flight: {}", v));
+    }
+    if let Some(v) = params.ssthresh {
+        ui.label(format!("Ssthresh: {}", v));
+    }
+    if let Some(v) = params.packets_in_flight {
+        ui.label(format!("Packets in Flight: {}", v));
+    }
+    if let Some(v) = params.pacing_rate {
+        ui.label(format!("Pacing Rate: {}", v));
+    }
+}
+
+fn render_timer_updated(ui: &mut egui::Ui, timer: &qlog::events::quic::TimerUpdated) {
+    ui.heading("Timer Updated");
+
+    ui.label(format!("Event Type: {:?}", timer.event_type));
+    if let Some(ref timer_type) = timer.timer_type {
+        ui.label(format!("Timer Type: {:?}", timer_type));
+    }
+    if let Some(path_id) = timer.path_id {
+        ui.label(format!("Path ID: {}", path_id));
+    }
+    if let Some(timer_id) = timer.timer_id {
+        ui.label(format!("Timer ID: {}", timer_id));
+    }
+    if let Some(ref pns) = timer.packet_number_space {
+        ui.label(format!("Packet Number Space: {:?}", pns));
+    }
+    if let Some(delta) = timer.delta {
+        ui.label(format!("Delta: {:.2}ms", delta));
+    }
+}
+
+fn render_ecn_state_updated(ui: &mut egui::Ui, ecn: &qlog::events::quic::EcnStateUpdated) {
+    ui.heading("ECN State Updated");
+
+    if let Some(ref old) = ecn.old {
+        ui.label(format!("Old State: {:?}", old));
+    }
+    ui.label(format!("New State: {:?}", ecn.new));
+}
+
+fn render_connection_started(
+    ui: &mut egui::Ui,
+    started: &qlog::events::quic::ConnectionStarted,
+    id_prefix: &str,
+    idx: usize,
+) {
+    ui.heading("Connection Started");
+
+    ui.label(RichText::new("Local").strong());
+    render_tuple_endpoint_info(ui, &started.local, &format!("local-{id_prefix}"), idx);
+    ui.add_space(5.);
+    ui.label(RichText::new("Remote").strong());
+    render_tuple_endpoint_info(ui, &started.remote, &format!("remote-{id_prefix}"), idx);
+}
+
+fn render_tuple_assigned(
+    ui: &mut egui::Ui,
+    tuple: &qlog::events::quic::TupleAssigned,
+    id_prefix: &str,
+    idx: usize,
+) {
+    ui.heading("Tuple Assigned");
+    ui.label(format!("Tuple ID: {}", tuple.tuple_id));
+
+    if let Some(ref local) = tuple.tuple_local {
+        ui.label(RichText::new("Local").strong());
+        render_tuple_endpoint_info(ui, &local, &format!("local-{id_prefix}"), idx);
+        ui.add_space(5.);
+    }
+    if let Some(ref remote) = tuple.tuple_remote {
+        ui.label(RichText::new("Remote").strong());
+        render_tuple_endpoint_info(ui, &remote, &format!("remote-{id_prefix}"), idx);
+    }
+}
+
+fn render_tuple_endpoint_info(
+    ui: &mut egui::Ui,
+    info: &qlog::events::TupleEndpointInfo,
+    id_prefix: &str,
+    idx: usize,
+) {
+    if let Some(ref v) = info.ip_v4 {
+        ui.label(format!("IP v4: {v}"));
+    }
+    if let Some(ref v) = info.port_v4 {
+        ui.label(format!("Port v4: {v}"));
+    }
+    if let Some(ref v) = info.ip_v6 {
+        ui.label(format!("IP v6: {v}"));
+    }
+    if let Some(v) = info.port_v6 {
+        ui.label(format!("Port v6: {v}"));
+    }
+
+    if let Some(ref ids) = info.connection_ids {
+        CollapsingHeader::new("Connection IDs")
+            .id_salt(format!("{}-connection-ids-{}", id_prefix, idx))
+            .default_open(true)
+            .show(ui, |ui| {
+                for connection in ids {
+                    ui.label(connection);
                 }
             });
     }
