@@ -149,6 +149,7 @@ pub enum MetricsEventType {
     MetricsUpdated,
     CongestionStateUpdated,
     PacketLost,
+    TimerUpdated,
     Other(String),
 }
 
@@ -160,6 +161,7 @@ impl MetricsEventType {
             Self::MetricsUpdated => Color32::from_rgb(142, 68, 173),   // Purple
             Self::CongestionStateUpdated => Color32::from_rgb(255, 152, 0), // Orange
             Self::PacketLost => Color32::from_rgb(244, 67, 54),        // Red
+            Self::TimerUpdated => Color32::from_rgb(158, 158, 158),    // Gray
             Self::Other(_) => Color32::from_rgb(158, 158, 158),        // Gray
         }
     }
@@ -171,6 +173,7 @@ impl MetricsEventType {
             Self::MetricsUpdated => "Metrics Updated".to_string(),
             Self::CongestionStateUpdated => "Congestion State".to_string(),
             Self::PacketLost => "Packet Lost".to_string(),
+            Self::TimerUpdated => "Timer Updated".to_string(),
             Self::Other(name) => name.clone(),
         }
     }
@@ -2019,6 +2022,47 @@ impl SequenceDiagram {
 
                 // Skip packet events (already rendered as arrows)
                 EventData::PacketSent(_) | EventData::PacketReceived(_) => None,
+
+                EventData::TimerUpdated(data) => {
+                    use qlog::events::quic::TimerType;
+
+                    let event_type = MetricsEventType::TimerUpdated;
+                    let color = self.get_event_color("timer_updated");
+                    let display_style = event_type.display_style();
+
+                    let timer_name = data.timer_type.as_ref().map_or_else(
+                        || "Unknown".to_string(),
+                        |t| match t {
+                            TimerType::Qlog(qt) => format!("{:?}", qt),
+                            TimerType::Custom(name) => name.to_string(),
+                        },
+                    );
+
+                    let display_text = format!("Timer: {}", timer_name);
+
+                    let mut detail_parts = vec![format!("Event: {:?}", data.event_type)];
+                    detail_parts.push(format!("Timer: {}", timer_name));
+                    if let Some(pid) = data.path_id {
+                        detail_parts.push(format!("Path: {}", pid));
+                    }
+                    if let Some(delta) = data.delta {
+                        detail_parts.push(format!("Delta: {:.2}ms", delta));
+                    }
+
+                    Some(MetricsEvent {
+                        time: event.time as f64,
+                        event_type,
+                        display_text,
+                        detail_text: detail_parts.join(", "),
+                        color,
+                        event_idx: idx,
+                        display_style,
+                        file_idx,
+                        path_id: data.path_id,
+                        smoothed_rtt: None,
+                        bytes_in_flight: None,
+                    })
+                }
 
                 // Render all other events as boxes
                 other => {
