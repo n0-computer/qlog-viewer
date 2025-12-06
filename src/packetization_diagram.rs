@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::qlog_data::QlogData;
 use crate::utils::{self, FrameType};
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
@@ -7,32 +9,34 @@ const LANE_HEIGHT: f32 = 30.0;
 const TOTAL_LANES: f32 = 4.0;
 
 pub struct PacketizationDiagram {
-    // Cached data
-    sent_data: Option<ByteStreamData>,
-    received_data: Option<ByteStreamData>,
+    // Cached data - keyed by path_id
+    sent_data: HashMap<u64, ByteStreamData>,
+    received_data: HashMap<u64, ByteStreamData>,
     cache_valid: bool,
     // View state
     compression: f32, // Bytes per pixel (higher = more compressed)
     show_sent: bool,
     show_received: bool,
+    split_by_path: bool,
 }
 
 impl PacketizationDiagram {
     pub fn new() -> Self {
         Self {
-            sent_data: None,
-            received_data: None,
+            sent_data: HashMap::new(),
+            received_data: HashMap::new(),
             cache_valid: false,
             compression: 10.0, // 10 bytes per pixel default
             show_sent: true,
             show_received: true,
+            split_by_path: false,
         }
     }
 
     pub fn invalidate_cache(&mut self) {
         self.cache_valid = false;
-        self.sent_data = None;
-        self.received_data = None;
+        self.sent_data.clear();
+        self.received_data.clear();
     }
 
     pub fn show(
@@ -44,8 +48,8 @@ impl PacketizationDiagram {
         // Extract and cache data
         if !self.cache_valid {
             let (sent, received) = Self::extract_byte_stream_data(qlog_data);
-            self.sent_data = Some(sent);
-            self.received_data = Some(received);
+            self.sent_data = sent;
+            self.received_data = received;
             self.cache_valid = true;
         }
 
@@ -55,6 +59,9 @@ impl PacketizationDiagram {
             ui.separator();
             ui.checkbox(&mut self.show_received, "Received");
             ui.checkbox(&mut self.show_sent, "Sent");
+            if self.sent_data.len() > 1 || self.received_data.len() > 1 {
+                ui.checkbox(&mut self.split_by_path, "Split by Path");
+            }
         });
 
         // Compression slider
@@ -81,26 +88,109 @@ impl PacketizationDiagram {
 
         // Show received data
         if self.show_received {
-            if let Some(ref data) = self.received_data {
+            if self.split_by_path {
+                let mut paths: Vec<_> = self.received_data.keys().copied().collect();
+                paths.sort();
+                for path_id in paths {
+                    if let Some(data) = self.received_data.get(&path_id) {
+                        ui.label(format!(
+                            "Received Path {}: {} bytes, {} packets",
+                            path_id, data.total_bytes, data.packet_count
+                        ));
+                        self.render_byte_stream(
+                            ui,
+                            &format!("received_p{}", path_id),
+                            data,
+                            bytes_per_pixel,
+                            selected_event_idx,
+                        );
+                        ui.add_space(5.0);
+                    }
+                }
+            } else {
+                let aggregated = Self::aggregate_paths(&self.received_data);
                 ui.label(format!(
                     "Bytes received: {} bytes, {} packets",
-                    data.total_bytes, data.packet_count
+                    aggregated.total_bytes, aggregated.packet_count
                 ));
-                self.render_byte_stream(ui, "received", data, bytes_per_pixel, selected_event_idx);
-                ui.add_space(10.0);
+                self.render_byte_stream(ui, "received", &aggregated, bytes_per_pixel, selected_event_idx);
             }
+            ui.add_space(10.0);
         }
 
         // Show sent data
         if self.show_sent {
-            if let Some(ref data) = self.sent_data {
+            if self.split_by_path {
+                let mut paths: Vec<_> = self.sent_data.keys().copied().collect();
+                paths.sort();
+                for path_id in paths {
+                    if let Some(data) = self.sent_data.get(&path_id) {
+                        ui.label(format!(
+                            "Sent Path {}: {} bytes, {} packets",
+                            path_id, data.total_bytes, data.packet_count
+                        ));
+                        self.render_byte_stream(
+                            ui,
+                            &format!("sent_p{}", path_id),
+                            data,
+                            bytes_per_pixel,
+                            selected_event_idx,
+                        );
+                        ui.add_space(5.0);
+                    }
+                }
+            } else {
+                let aggregated = Self::aggregate_paths(&self.sent_data);
                 ui.label(format!(
                     "Bytes sent: {} bytes, {} packets",
-                    data.total_bytes, data.packet_count
+                    aggregated.total_bytes, aggregated.packet_count
                 ));
-                self.render_byte_stream(ui, "sent", data, bytes_per_pixel, selected_event_idx);
+                self.render_byte_stream(ui, "sent", &aggregated, bytes_per_pixel, selected_event_idx);
             }
         }
+    }
+
+    fn aggregate_paths(data: &HashMap<u64, ByteStreamData>) -> ByteStreamData {
+        let mut result = ByteStreamData::new();
+        let mut offset: u64 = 0;
+
+        let mut paths: Vec<_> = data.keys().copied().collect();
+        paths.sort();
+
+        for path_id in paths {
+            if let Some(path_data) = data.get(&path_id) {
+                for packet in &path_data.packets {
+                    result.packets.push(PacketRange {
+                        start_byte: offset + packet.start_byte,
+                        end_byte: offset + packet.end_byte,
+                        packet_number: packet.packet_number,
+                        packet_type: packet.packet_type.clone(),
+                        size: packet.size,
+                        event_idx: packet.event_idx,
+                    });
+                }
+                for frame in &path_data.frames {
+                    result.frames.push(FrameRange {
+                        start_byte: offset + frame.start_byte,
+                        end_byte: offset + frame.end_byte,
+                        frame_type: frame.frame_type.clone(),
+                        size: frame.size,
+                        stream_id: frame.stream_id,
+                        event_idx: frame.event_idx,
+                    });
+                }
+                for (stream_id, ranges) in &path_data.stream_ranges {
+                    let entry = result.stream_ranges.entry(*stream_id).or_default();
+                    for (start, end, evt_idx) in ranges {
+                        entry.push((offset + start, offset + end, *evt_idx));
+                    }
+                }
+                result.packet_count += path_data.packet_count;
+                offset += path_data.total_bytes;
+            }
+        }
+        result.total_bytes = offset;
+        result
     }
 
     fn render_byte_stream(
@@ -482,23 +572,27 @@ impl PacketizationDiagram {
         });
     }
 
-    fn extract_byte_stream_data(qlog_data: &QlogData) -> (ByteStreamData, ByteStreamData) {
-        let mut sent = ByteStreamData::new();
-        let mut received = ByteStreamData::new();
-
-        let mut sent_offset: u64 = 0;
-        let mut recv_offset: u64 = 0;
+    fn extract_byte_stream_data(
+        qlog_data: &QlogData,
+    ) -> (HashMap<u64, ByteStreamData>, HashMap<u64, ByteStreamData>) {
+        let mut sent: HashMap<u64, ByteStreamData> = HashMap::new();
+        let mut received: HashMap<u64, ByteStreamData> = HashMap::new();
+        let mut sent_offsets: HashMap<u64, u64> = HashMap::new();
+        let mut recv_offsets: HashMap<u64, u64> = HashMap::new();
 
         for (event_idx, event) in qlog_data.events.iter().enumerate() {
             match &event.data {
                 EventData::PacketSent(data) => {
+                    let path_id = data.header.path_id.unwrap_or(0);
                     let size = data.raw.as_ref().and_then(|r| r.length).unwrap_or(1200);
-                    let start = sent_offset;
-                    let end = sent_offset + size;
+                    let offset = sent_offsets.entry(path_id).or_insert(0);
+                    let start = *offset;
+                    let end = start + size;
                     let packet_number = data.header.packet_number.unwrap_or(0);
                     let packet_type = format!("{:?}", data.header.packet_type);
 
-                    sent.packets.push(PacketRange {
+                    let path_data = sent.entry(path_id).or_insert_with(ByteStreamData::new);
+                    path_data.packets.push(PacketRange {
                         start_byte: start,
                         end_byte: end,
                         packet_number,
@@ -506,9 +600,8 @@ impl PacketizationDiagram {
                         size,
                         event_idx,
                     });
-                    sent.packet_count += 1;
+                    path_data.packet_count += 1;
 
-                    // Extract frames
                     if let Some(ref frames) = data.frames {
                         let frame_count = frames.len();
                         let frame_size = if frame_count > 0 {
@@ -523,7 +616,7 @@ impl PacketizationDiagram {
                             let frame_end = (frame_offset + actual_size).min(end);
                             let clamped_size = frame_end - frame_offset;
 
-                            sent.frames.push(FrameRange {
+                            path_data.frames.push(FrameRange {
                                 start_byte: frame_offset,
                                 end_byte: frame_end,
                                 frame_type: FrameType::from_quic_frame(frame),
@@ -534,7 +627,7 @@ impl PacketizationDiagram {
 
                             if let QuicFrame::Stream { stream_id, raw, .. } = frame {
                                 let length = raw.as_ref().and_then(|r| r.length).unwrap_or(1000);
-                                sent.stream_ranges.entry(*stream_id).or_default().push((
+                                path_data.stream_ranges.entry(*stream_id).or_default().push((
                                     frame_offset,
                                     frame_offset + length,
                                     event_idx,
@@ -545,17 +638,20 @@ impl PacketizationDiagram {
                         }
                     }
 
-                    sent_offset = end;
-                    sent.total_bytes = end;
+                    *offset = end;
+                    path_data.total_bytes = end;
                 }
                 EventData::PacketReceived(data) => {
+                    let path_id = data.header.path_id.unwrap_or(0);
                     let size = data.raw.as_ref().and_then(|r| r.length).unwrap_or(1200);
-                    let start = recv_offset;
-                    let end = recv_offset + size;
+                    let offset = recv_offsets.entry(path_id).or_insert(0);
+                    let start = *offset;
+                    let end = start + size;
                     let packet_number = data.header.packet_number.unwrap_or(0);
                     let packet_type = format!("{:?}", data.header.packet_type);
 
-                    received.packets.push(PacketRange {
+                    let path_data = received.entry(path_id).or_insert_with(ByteStreamData::new);
+                    path_data.packets.push(PacketRange {
                         start_byte: start,
                         end_byte: end,
                         packet_number,
@@ -563,9 +659,8 @@ impl PacketizationDiagram {
                         size,
                         event_idx,
                     });
-                    received.packet_count += 1;
+                    path_data.packet_count += 1;
 
-                    // Extract frames
                     if let Some(ref frames) = data.frames {
                         let frame_count = frames.len();
                         let frame_size = if frame_count > 0 {
@@ -580,7 +675,7 @@ impl PacketizationDiagram {
                             let frame_end = (frame_offset + actual_size).min(end);
                             let clamped_size = frame_end - frame_offset;
 
-                            received.frames.push(FrameRange {
+                            path_data.frames.push(FrameRange {
                                 start_byte: frame_offset,
                                 end_byte: frame_end,
                                 frame_type: FrameType::from_quic_frame(frame),
@@ -591,7 +686,7 @@ impl PacketizationDiagram {
 
                             if let QuicFrame::Stream { stream_id, raw, .. } = frame {
                                 let length = raw.as_ref().and_then(|r| r.length).unwrap_or(1000);
-                                received.stream_ranges.entry(*stream_id).or_default().push((
+                                path_data.stream_ranges.entry(*stream_id).or_default().push((
                                     frame_offset,
                                     frame_offset + length,
                                     event_idx,
@@ -602,8 +697,8 @@ impl PacketizationDiagram {
                         }
                     }
 
-                    recv_offset = end;
-                    received.total_bytes = end;
+                    *offset = end;
+                    path_data.total_bytes = end;
                 }
                 _ => {}
             }
@@ -616,7 +711,7 @@ impl PacketizationDiagram {
 struct ByteStreamData {
     packets: Vec<PacketRange>,
     frames: Vec<FrameRange>,
-    stream_ranges: std::collections::HashMap<u64, Vec<(u64, u64, usize)>>, // (start, end, event_idx)
+    stream_ranges: HashMap<u64, Vec<(u64, u64, usize)>>, // (start, end, event_idx)
     total_bytes: u64,
     packet_count: usize,
 }
@@ -626,7 +721,7 @@ impl ByteStreamData {
         Self {
             packets: Vec::new(),
             frames: Vec::new(),
-            stream_ranges: std::collections::HashMap::new(),
+            stream_ranges: HashMap::new(),
             total_bytes: 0,
             packet_count: 0,
         }
