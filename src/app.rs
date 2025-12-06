@@ -604,6 +604,38 @@ impl QlogViewerApp {
             render_transport_parameters(ui, params, id_prefix, idx);
         }
 
+        // Render restored parameters
+        if let EventData::ParametersRestored(ref params) = event.data {
+            ui.add_space(5.);
+            ui.separator();
+            ui.add_space(5.);
+            render_parameters_restored(ui, params);
+        }
+
+        // Render recovery parameters
+        if let EventData::RecoveryParametersSet(ref params) = event.data {
+            ui.add_space(5.);
+            ui.separator();
+            ui.add_space(5.);
+            render_recovery_parameters(ui, params);
+        }
+
+        // Render timer updated event
+        if let EventData::TimerUpdated(ref timer) = event.data {
+            ui.add_space(5.);
+            ui.separator();
+            ui.add_space(5.);
+            render_timer_updated(ui, timer);
+        }
+
+        // Render ECN state updated event
+        if let EventData::EcnStateUpdated(ref ecn) = event.data {
+            ui.add_space(5.);
+            ui.separator();
+            ui.add_space(5.);
+            render_ecn_state_updated(ui, ecn);
+        }
+
         if event.data.contains_quic_frames().is_some() {
             ui.add_space(5.);
             ui.separator();
@@ -1777,4 +1809,116 @@ fn render_transport_parameters(
                 }
             });
     }
+}
+
+fn render_parameters_restored(ui: &mut egui::Ui, params: &qlog::events::quic::ParametersRestored) {
+    ui.heading("Restored Parameters (0-RTT)");
+
+    if let Some(v) = params.max_idle_timeout {
+        ui.label(format!("Max Idle Timeout: {}ms", v));
+    }
+    if let Some(v) = params.max_udp_payload_size {
+        ui.label(format!("Max UDP Payload: {} bytes", v));
+    }
+    if let Some(v) = params.active_connection_id_limit {
+        ui.label(format!("Active CID Limit: {}", v));
+    }
+    if let Some(v) = params.initial_max_data {
+        ui.label(format!("Initial Max Data: {}", utils::format_bytes(v)));
+    }
+    if let Some(v) = params.initial_max_stream_data_bidi_local {
+        ui.label(format!(
+            "Max Stream Data (bidi local): {}",
+            utils::format_bytes(v)
+        ));
+    }
+    if let Some(v) = params.initial_max_stream_data_bidi_remote {
+        ui.label(format!(
+            "Max Stream Data (bidi remote): {}",
+            utils::format_bytes(v)
+        ));
+    }
+    if let Some(v) = params.initial_max_stream_data_uni {
+        ui.label(format!("Max Stream Data (uni): {}", utils::format_bytes(v)));
+    }
+    if let Some(v) = params.initial_max_streams_bidi {
+        ui.label(format!("Max Streams (bidi): {}", v));
+    }
+    if let Some(v) = params.initial_max_streams_uni {
+        ui.label(format!("Max Streams (uni): {}", v));
+    }
+    if let Some(v) = params.disable_active_migration {
+        ui.label(format!("Disable Active Migration: {}", v));
+    }
+    if let Some(v) = params.max_datagram_frame_size {
+        ui.label(format!("Max Datagram Frame: {} bytes", v));
+    }
+    if let Some(v) = params.grease_quic_bit {
+        ui.label(format!("GREASE QUIC Bit: {}", v));
+    }
+}
+
+fn render_recovery_parameters(
+    ui: &mut egui::Ui,
+    params: &qlog::events::quic::RecoveryParametersSet,
+) {
+    ui.heading("Recovery Parameters");
+
+    if let Some(v) = params.reordering_threshold {
+        ui.label(format!("Reordering Threshold: {}", v));
+    }
+    if let Some(v) = params.time_threshold {
+        ui.label(format!("Time Threshold: {:.2}", v));
+    }
+    if let Some(v) = params.timer_granularity {
+        ui.label(format!("Timer Granularity: {}ms", v));
+    }
+    if let Some(v) = params.initial_rtt {
+        ui.label(format!("Initial RTT: {:.2}ms", v));
+    }
+    if let Some(v) = params.max_datagram_size {
+        ui.label(format!("Max Datagram Size: {} bytes", v));
+    }
+    if let Some(v) = params.initial_congestion_window {
+        ui.label(format!("Initial CWND: {}", utils::format_bytes(v)));
+    }
+    if let Some(v) = params.minimum_congestion_window {
+        ui.label(format!("Min CWND: {} bytes", v));
+    }
+    if let Some(v) = params.loss_reduction_factor {
+        ui.label(format!("Loss Reduction Factor: {:.2}", v));
+    }
+    if let Some(v) = params.persistent_congestion_threshold {
+        ui.label(format!("Persistent Congestion Threshold: {}", v));
+    }
+}
+
+fn render_timer_updated(ui: &mut egui::Ui, timer: &qlog::events::quic::TimerUpdated) {
+    ui.heading("Timer Updated");
+
+    ui.label(format!("Event Type: {:?}", timer.event_type));
+    if let Some(ref timer_type) = timer.timer_type {
+        ui.label(format!("Timer Type: {:?}", timer_type));
+    }
+    if let Some(path_id) = timer.path_id {
+        ui.label(format!("Path ID: {}", path_id));
+    }
+    if let Some(timer_id) = timer.timer_id {
+        ui.label(format!("Timer ID: {}", timer_id));
+    }
+    if let Some(ref pns) = timer.packet_number_space {
+        ui.label(format!("Packet Number Space: {:?}", pns));
+    }
+    if let Some(delta) = timer.delta {
+        ui.label(format!("Delta: {:.2}ms", delta));
+    }
+}
+
+fn render_ecn_state_updated(ui: &mut egui::Ui, ecn: &qlog::events::quic::EcnStateUpdated) {
+    ui.heading("ECN State Updated");
+
+    if let Some(ref old) = ecn.old {
+        ui.label(format!("Old State: {:?}", old));
+    }
+    ui.label(format!("New State: {:?}", ecn.new));
 }
