@@ -858,20 +858,22 @@ impl QlogViewerApp {
 
 impl eframe::App for QlogViewerApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // Handle number key shortcuts for view switching
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::Num1) {
-                self.view_mode = ViewMode::EventList;
-            } else if i.key_pressed(egui::Key::Num2) {
-                self.view_mode = ViewMode::SequenceDiagram;
-            } else if i.key_pressed(egui::Key::Num3) {
-                self.view_mode = ViewMode::CongestionGraph;
-            } else if i.key_pressed(egui::Key::Num4) {
-                self.view_mode = ViewMode::PacketizationDiagram;
-            } else if i.key_pressed(egui::Key::Num5) {
-                self.view_mode = ViewMode::StatsView;
-            }
-        });
+        // Handle number key shortcuts for view switching (only when no text input is focused)
+        if !ctx.wants_keyboard_input() {
+            ctx.input(|i| {
+                if i.key_pressed(egui::Key::Num1) {
+                    self.view_mode = ViewMode::EventList;
+                } else if i.key_pressed(egui::Key::Num2) {
+                    self.view_mode = ViewMode::SequenceDiagram;
+                } else if i.key_pressed(egui::Key::Num3) {
+                    self.view_mode = ViewMode::CongestionGraph;
+                } else if i.key_pressed(egui::Key::Num4) {
+                    self.view_mode = ViewMode::PacketizationDiagram;
+                } else if i.key_pressed(egui::Key::Num5) {
+                    self.view_mode = ViewMode::StatsView;
+                }
+            });
+        }
 
         self.render_menu_bar(ctx);
         self.render_event_detail(ctx);
