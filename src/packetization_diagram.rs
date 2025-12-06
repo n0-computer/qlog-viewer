@@ -143,7 +143,7 @@ impl PacketizationDiagram {
                     let top_margin = 5.0;
 
                     // Lane labels (draw at fixed position relative to viewport)
-                    let labels = ["Stream IDs", "HTTP/3", "QUIC frames", "QUIC packets"];
+                    let labels = ["Stream IDs", "Stream Data", "QUIC Frames", "QUIC Packets"];
                     let label_x = rect.left() + viewport.left() + 5.0;
                     for (i, label) in labels.iter().enumerate() {
                         let y =
@@ -311,7 +311,7 @@ impl PacketizationDiagram {
                         }
                     }
 
-                    // Lane 1: HTTP/3 - only render visible stream frames
+                    // Lane 1: Stream Data - only render visible stream frames
                     let lane_y = rect.top() + top_margin + 1.0 * LANE_HEIGHT;
                     for frame in data.frames.iter().skip(first_frame_idx) {
                         if frame.start_byte > render_end {
@@ -324,31 +324,31 @@ impl PacketizationDiagram {
                                 draw_left + (frame.end_byte as f64 / bytes_per_pixel) as f32;
                             let width = (x_end - x_start).max(1.0);
 
-                            let http3_rect = Rect::from_min_size(
+                            let stream_rect = Rect::from_min_size(
                                 Pos2::new(x_start, lane_y + 2.0),
                                 Vec2::new(width, LANE_HEIGHT - 4.0),
                             );
 
-                            painter.rect_filled(http3_rect, 1.0, Color32::from_rgb(255, 255, 0));
+                            painter.rect_filled(stream_rect, 1.0, Color32::from_rgb(255, 255, 0));
 
-                            // Check click for HTTP/3 layer
+                            // Check click for Stream Data layer
                             if let Some(pos) = click_pos {
-                                if http3_rect.contains(pos) && clicked_event_idx.is_none() {
+                                if stream_rect.contains(pos) && clicked_event_idx.is_none() {
                                     clicked_event_idx = Some(frame.event_idx);
                                 }
                             }
 
-                            // Check hover for HTTP/3 layer
+                            // Check hover for Stream Data layer
                             if hover_text.is_none() {
                                 if let Some(pos) = hover_pos {
-                                    if http3_rect.contains(pos) {
+                                    if stream_rect.contains(pos) {
                                         let stream_id = frame.stream_id.unwrap_or(0);
                                         hover_text = Some(format!(
-                                            "HTTP/3 Data\nStream: {}, Size: {} bytes",
+                                            "Stream Data\nStream: {}, Size: {} bytes",
                                             stream_id, frame.size
                                         ));
                                         painter.rect_stroke(
-                                            http3_rect,
+                                            stream_rect,
                                             1.0,
                                             Stroke::new(2.0, Color32::BLACK),
                                             StrokeKind::Inside,
@@ -521,12 +521,13 @@ impl PacketizationDiagram {
                         for frame in frames.iter() {
                             let actual_size = utils::get_frame_size(frame).unwrap_or(frame_size);
                             let frame_end = (frame_offset + actual_size).min(end);
+                            let clamped_size = frame_end - frame_offset;
 
                             sent.frames.push(FrameRange {
                                 start_byte: frame_offset,
                                 end_byte: frame_end,
                                 frame_type: FrameType::from_quic_frame(frame),
-                                size: actual_size,
+                                size: clamped_size,
                                 stream_id: utils::get_frame_stream_id(frame),
                                 event_idx,
                             });
@@ -577,12 +578,13 @@ impl PacketizationDiagram {
                         for frame in frames.iter() {
                             let actual_size = utils::get_frame_size(frame).unwrap_or(frame_size);
                             let frame_end = (frame_offset + actual_size).min(end);
+                            let clamped_size = frame_end - frame_offset;
 
                             received.frames.push(FrameRange {
                                 start_byte: frame_offset,
                                 end_byte: frame_end,
                                 frame_type: FrameType::from_quic_frame(frame),
-                                size: actual_size,
+                                size: clamped_size,
                                 stream_id: utils::get_frame_stream_id(frame),
                                 event_idx,
                             });
