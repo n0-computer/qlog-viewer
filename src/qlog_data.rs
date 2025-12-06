@@ -211,7 +211,18 @@ impl QlogData {
                 format!("Frames: {}", d.frames.len())
             }
             EventData::TimerUpdated(d) => {
-                format!("Timer: {:?} {:?}", d.timer_type, d.event_type)
+                let timer_name = match &d.timer_type {
+                    Some(t) => {
+                        let s = format!("{:?}", t);
+                        s.replace("Qlog(", "")
+                            .replace("Custom(\"", "")
+                            .replace("\")", "")
+                            .replace(")", "")
+                    }
+                    None => "Unknown".to_string(),
+                };
+                let action = format!("{:?}", d.event_type);
+                format!("{} {}", timer_name, action)
             }
             EventData::ParametersRestored(_) => "Restored params".to_string(),
             EventData::RecoveryParametersSet(_) => "Recovery params".to_string(),

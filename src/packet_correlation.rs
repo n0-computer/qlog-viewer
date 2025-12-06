@@ -51,7 +51,10 @@ impl CongestionState {
 #[derive(Debug, Clone)]
 pub struct SentPacketInfo {
     pub time: f32,
+    pub event_idx: usize,
     pub ack_time: Option<f32>,
+    pub ack_event_idx: Option<usize>,
+    pub loss_event_idx: Option<usize>,
     pub rtt: Option<f32>,
 }
 
@@ -107,6 +110,10 @@ pub struct PacketCorrelation {
     // packet_type is the packet space (Initial, Handshake, 1RTT, etc.)
     pub sent_packets: HashMap<(u64, String, u64), SentPacketInfo>,
     pub lost_packets: HashMap<(u64, String, u64), f32>,
+    // Reverse mappings for event linking
+    pub sent_event_to_key: HashMap<usize, (u64, String, u64)>,
+    pub ack_event_to_sent_keys: HashMap<usize, Vec<(u64, String, u64)>>,
+    pub loss_event_to_key: HashMap<usize, (u64, String, u64)>,
     pub reorderings: Vec<ReorderEvent>,
     pub time_gaps: Vec<TimeGap>,
     pub congestion_states: Vec<CongestionPeriod>,
@@ -138,33 +145,43 @@ impl PacketCorrelation {
     }
 
     fn extract_sent_packets(&mut self, qlog: &QlogData) {
-        for event in qlog.events.iter() {
+        for (event_idx, event) in qlog.events.iter().enumerate() {
             if let EventData::PacketSent(data) = &event.data {
                 if let Some(pn) = data.header.packet_number {
                     let path_id = data.header.path_id.unwrap_or(0);
                     let packet_type = format!("{:?}", data.header.packet_type);
+                    let key = (path_id, packet_type, pn);
                     self.sent_packets.insert(
-                        (path_id, packet_type, pn),
+                        key.clone(),
                         SentPacketInfo {
                             time: event.time,
+                            event_idx,
                             ack_time: None,
+                            ack_event_idx: None,
+                            loss_event_idx: None,
                             rtt: None,
                         },
                     );
+                    self.sent_event_to_key.insert(event_idx, key);
                 }
             }
         }
     }
 
     fn extract_losses(&mut self, qlog: &QlogData) {
-        for event in qlog.events.iter() {
+        for (event_idx, event) in qlog.events.iter().enumerate() {
             if let EventData::PacketLost(data) = &event.data {
                 if let Some(header) = &data.header {
                     if let Some(pn) = header.packet_number {
                         let path_id = header.path_id.unwrap_or(0);
                         let packet_type = format!("{:?}", header.packet_type);
-                        self.lost_packets
-                            .insert((path_id, packet_type, pn), event.time);
+                        let key = (path_id, packet_type, pn);
+                        self.lost_packets.insert(key.clone(), event.time);
+                        self.loss_event_to_key.insert(event_idx, key.clone());
+                        // Link back to sent packet
+                        if let Some(sent) = self.sent_packets.get_mut(&key) {
+                            sent.loss_event_idx = Some(event_idx);
+                        }
                     }
                 }
             }
@@ -174,28 +191,31 @@ impl PacketCorrelation {
     fn correlate_acks(&mut self, qlog: &QlogData) {
         // First try PacketsAcked events (most accurate)
         // Note: PacketsAcked doesn't include path_id or packet_type, so we try to match against all combinations
-        for event in qlog.events.iter() {
+        for (event_idx, event) in qlog.events.iter().enumerate() {
             if let EventData::PacketsAcked(data) = &event.data {
                 if let Some(ref packet_numbers) = data.packet_numbers {
+                    let mut acked_keys = Vec::new();
                     for &pn in packet_numbers {
                         // Try to find this packet in any path and packet space
                         // Try common packet types first for efficiency
                         let packet_types = ["OneRtt", "Initial", "Handshake", "ZeroRtt"];
                         'outer: for packet_type in &packet_types {
                             for path_id in 0..=255 {
-                                if let Some(sent) = self.sent_packets.get_mut(&(
-                                    path_id,
-                                    packet_type.to_string(),
-                                    pn,
-                                )) {
+                                let key = (path_id, packet_type.to_string(), pn);
+                                if let Some(sent) = self.sent_packets.get_mut(&key) {
                                     if sent.ack_time.is_none() {
                                         sent.ack_time = Some(event.time);
+                                        sent.ack_event_idx = Some(event_idx);
                                         sent.rtt = Some(event.time - sent.time);
                                     }
+                                    acked_keys.push(key);
                                     break 'outer;
                                 }
                             }
                         }
+                    }
+                    if !acked_keys.is_empty() {
+                        self.ack_event_to_sent_keys.insert(event_idx, acked_keys);
                     }
                 }
             }
@@ -203,7 +223,7 @@ impl PacketCorrelation {
 
         // Also extract ACKs from received packets' ACK frames
         // In QUIC, ACKs in a packet space acknowledge packets in the same packet space
-        for event in &qlog.events {
+        for (event_idx, event) in qlog.events.iter().enumerate() {
             let EventData::PacketReceived(data) = &event.data else {
                 continue;
             };
@@ -213,6 +233,7 @@ impl PacketCorrelation {
             let path_id = data.header.path_id.unwrap_or(0);
             let packet_type = format!("{:?}", data.header.packet_type);
 
+            let mut acked_keys = Vec::new();
             for frame in frames {
                 let QuicFrame::Ack {
                     acked_ranges: Some(ranges),
@@ -229,16 +250,22 @@ impl PacketCorrelation {
 
                 for pn in pns {
                     // ACK in this packet space acknowledges packets in the same packet space
-                    if let Some(sent) =
-                        self.sent_packets
-                            .get_mut(&(path_id, packet_type.clone(), pn))
-                    {
+                    let key = (path_id, packet_type.clone(), pn);
+                    if let Some(sent) = self.sent_packets.get_mut(&key) {
                         if sent.ack_time.is_none() {
                             sent.ack_time = Some(event.time);
+                            sent.ack_event_idx = Some(event_idx);
                             sent.rtt = Some(event.time - sent.time);
                         }
+                        acked_keys.push(key);
                     }
                 }
+            }
+            if !acked_keys.is_empty() {
+                self.ack_event_to_sent_keys
+                    .entry(event_idx)
+                    .or_default()
+                    .extend(acked_keys);
             }
         }
     }
@@ -361,6 +388,40 @@ impl PacketCorrelation {
             .iter()
             .filter(|g| g.end_time >= start_time && g.start_time <= end_time)
             .collect()
+    }
+
+    pub fn get_related_events(&self, event_idx: usize) -> Vec<(usize, &'static str)> {
+        let mut related = Vec::new();
+
+        // If this is a sent packet, find its ack and/or loss events
+        if let Some(key) = self.sent_event_to_key.get(&event_idx) {
+            if let Some(sent) = self.sent_packets.get(key) {
+                if let Some(ack_idx) = sent.ack_event_idx {
+                    related.push((ack_idx, "Acked by"));
+                }
+                if let Some(loss_idx) = sent.loss_event_idx {
+                    related.push((loss_idx, "Lost at"));
+                }
+            }
+        }
+
+        // If this is an ack event, find the sent packets it acked
+        if let Some(keys) = self.ack_event_to_sent_keys.get(&event_idx) {
+            for key in keys {
+                if let Some(sent) = self.sent_packets.get(key) {
+                    related.push((sent.event_idx, "Acks sent"));
+                }
+            }
+        }
+
+        // If this is a loss event, find the sent packet
+        if let Some(key) = self.loss_event_to_key.get(&event_idx) {
+            if let Some(sent) = self.sent_packets.get(key) {
+                related.push((sent.event_idx, "Original sent"));
+            }
+        }
+
+        related
     }
 }
 
