@@ -2,6 +2,7 @@ mod app;
 mod congestion_graph;
 mod constants;
 mod event_detail_ui;
+mod event_list;
 mod multiplexing_diagram;
 mod packet_correlation;
 mod packetization_diagram;
