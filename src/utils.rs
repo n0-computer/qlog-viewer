@@ -1,5 +1,10 @@
 use egui::Color32;
-use qlog::events::quic::{AckedRanges, QuicFrame};
+use qlog::events::{
+    quic::{AckedRanges, QuicFrame},
+    EventData,
+};
+
+use crate::constants::DEFAULT_PATH_ID;
 
 /// QUIC frame types for display and coloring.
 #[derive(Debug, Clone, PartialEq)]
@@ -228,20 +233,6 @@ impl FrameType {
         }
     }
 
-    /// Alternative color scheme for packetization diagram.
-    pub fn packetization_color(&self) -> Color32 {
-        match self {
-            Self::Stream(_) => Color32::from_rgb(255, 80, 80),
-            Self::Crypto => Color32::from_rgb(255, 150, 150),
-            Self::Ack => Color32::from_rgb(180, 180, 180),
-            Self::Padding => Color32::from_rgb(100, 100, 100),
-            Self::MaxData | Self::MaxStreamData => Color32::from_rgb(150, 200, 255),
-            Self::HandshakeDone => Color32::from_rgb(150, 255, 150),
-            Self::ConnectionClose => Color32::from_rgb(255, 100, 100),
-            _ => Color32::from_rgb(200, 200, 200),
-        }
-    }
-
     /// Check if this frame type is a stream frame.
     pub fn is_stream(&self) -> bool {
         matches!(self, Self::Stream(_))
@@ -395,5 +386,20 @@ pub fn format_acked_ranges(ranges: &AckedRanges) -> String {
             })
             .collect::<Vec<_>>()
             .join(", "),
+    }
+}
+
+/// Extract path_id from an EventData, returning DEFAULT_PATH_ID if not applicable.
+pub fn get_event_path_id(event_data: &EventData) -> u64 {
+    match event_data {
+        EventData::PacketSent(data) => data.header.path_id.unwrap_or(DEFAULT_PATH_ID),
+        EventData::PacketReceived(data) => data.header.path_id.unwrap_or(DEFAULT_PATH_ID),
+        EventData::PacketLost(data) => data
+            .header
+            .as_ref()
+            .and_then(|h| h.path_id)
+            .unwrap_or(DEFAULT_PATH_ID),
+        EventData::MetricsUpdated(data) => data.path_id.unwrap_or(DEFAULT_PATH_ID),
+        _ => DEFAULT_PATH_ID,
     }
 }

@@ -1,75 +1,47 @@
-use crate::app::LoadedFile;
+mod drawing;
+mod helpers;
+mod metrics_types;
+mod types;
+
 use crate::packet_correlation::PacketCorrelation;
 use crate::qlog_data::QlogData;
+use crate::time_compression::{
+    compute_compressed_height, time_to_compressed_y, TimeContext, TimeGap,
+};
+use crate::types::{CachingVisualization, LoadedFile};
 use crate::utils::{self, FrameType};
-use egui::epaint::Hsva;
+use drawing::{
+    draw_arrowhead, draw_frame_tags, draw_gap_indicators, draw_header, draw_lane_timelines,
+    draw_loss_marker, draw_path_legend, draw_rotated_text, draw_time_markers, draw_timelines,
+};
 use egui::{Color32, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
-use qlog::events::{EventData, TupleEndpointInfo};
+use helpers::{
+    build_dual_arrows, build_single_file_arrows, compute_time_bounds, count_simultaneous_sends,
+    detect_gaps, event_data_name, format_bytes, point_to_line_segment_distance,
+};
+use metrics_types::{
+    LastMetricsState, MetricsDisplayStyle, MetricsEvent, MetricsEventType,
+    MetricsVisualizationMode, PathKey, PathMetricData,
+};
+use qlog::events::EventData;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use types::{
+    path_color, ArrowInteractionData, DiagramLayout, DualArrow, ExtractedPackets, PacketDirection,
+    PacketInfo, PathLaneLayout, SelectedArrowRenderData, TupleInfo,
+};
 
 const HEADER_HEIGHT: f32 = 65.0;
 const DUAL_LEFT_MARGIN: f32 = 180.0;
 const DUAL_RIGHT_MARGIN: f32 = 180.0;
 const SENT_COLOR: Color32 = Color32::from_rgb(0, 150, 255);
 const RECEIVED_COLOR: Color32 = Color32::from_rgb(220, 80, 80);
-const LOSS_COLOR: Color32 = Color32::RED;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisualizationMode {
     ColorCoded,
     VerticalLanes,
-}
-
-// Path color palette for multipath visualization
-const PATH_COLORS: &[(u8, u8, u8)] = &[
-    (41, 128, 185), // Blue (path 0)
-    (39, 174, 96),  // Green (path 1)
-    (230, 126, 34), // Orange (path 2)
-    (142, 68, 173), // Purple (path 3)
-    (192, 57, 43),  // Red (path 4)
-    (22, 160, 133), // Teal (path 5)
-];
-
-/// Data needed to render a selected arrow in the second pass (on top of other arrows)
-struct SelectedArrowRenderData {
-    arrow_idx: usize,
-    start_x: f32,
-    y_send_adjusted: f32,
-    actual_end_x: f32,
-    actual_end_y: f32,
-    is_truncated: bool,
-    count: usize,
-    idx: usize,
-    y_send: f32,
-}
-
-/// Data for arrow interaction (click/selection)
-struct ArrowInteractionData {
-    arrow_idx: usize,
-    sent_event_idx: usize,
-    recv_event_idx: Option<usize>,
-    from_left: bool,
-    rect: Rect,
-    line_start_x: f32,
-    line_start_y: f32,
-    line_end_x: f32,
-    line_end_y: f32,
-}
-
-fn path_color(path_id: u64) -> Color32 {
-    if let Some(&(r, g, b)) = PATH_COLORS.get(path_id as usize) {
-        Color32::from_rgb(r, g, b)
-    } else {
-        // Golden ratio hashing for path_id > 5
-        let hue = ((path_id as f32 * 137.508) % 360.0) / 360.0;
-        hsv_to_rgb(hue, 0.7, 0.8)
-    }
-}
-
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color32 {
-    Hsva::new(h, s, v, 1.0).into()
 }
 
 pub struct SequenceDiagram {
@@ -97,194 +69,6 @@ pub struct SequenceDiagram {
     tuple_map_right: HashMap<String, TupleInfo>,
     // Toggle for packet labels visibility
     pub show_packet_labels: bool,
-}
-
-const GAP_THRESHOLD_MS: f64 = 5.0;
-const COMPRESSED_GAP_HEIGHT: f32 = 30.0;
-
-#[derive(Clone)]
-struct TimeGap {
-    start_time: f64,
-    end_time: f64,
-    compressed_amount: f64,
-}
-
-#[derive(Debug, Clone)]
-struct LastMetricsState {
-    smoothed_rtt: Option<f32>,
-    bytes_in_flight: Option<u64>,
-    congestion_window: Option<u64>,
-}
-
-/// Key for identifying a specific path in metrics data
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PathKey {
-    file_idx: usize,
-    path_id: u64,
-}
-
-/// Metric data points for a specific path
-#[derive(Debug, Clone, Default)]
-struct PathMetricData {
-    bytes_in_flight: Vec<(f64, u64)>,
-    rtt: Vec<(f64, f32)>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetricsDisplayStyle {
-    Box,    // Colored box in margin (for important events)
-    Marker, // Small shape on timeline (for frequent events)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetricsVisualizationMode {
-    Events, // Show boxes and markers for events
-    Graphs, // Show vertical line graphs for metrics
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MetricsEventType {
-    ConnectionStarted,
-    ConnectionStateUpdated,
-    MetricsUpdated,
-    CongestionStateUpdated,
-    PacketLost,
-    TimerUpdated,
-    Other(String),
-}
-
-impl MetricsEventType {
-    fn color(&self) -> Color32 {
-        match self {
-            Self::ConnectionStarted => Color32::from_rgb(0, 150, 136), // Teal
-            Self::ConnectionStateUpdated => Color32::from_rgb(0, 150, 136), // Teal
-            Self::MetricsUpdated => Color32::from_rgb(142, 68, 173),   // Purple
-            Self::CongestionStateUpdated => Color32::from_rgb(255, 152, 0), // Orange
-            Self::PacketLost => Color32::from_rgb(244, 67, 54),        // Red
-            Self::TimerUpdated => Color32::from_rgb(158, 158, 158),    // Gray
-            Self::Other(_) => Color32::from_rgb(158, 158, 158),        // Gray
-        }
-    }
-
-    fn name(&self) -> String {
-        match self {
-            Self::ConnectionStarted => "Connection Started".to_string(),
-            Self::ConnectionStateUpdated => "Connection State".to_string(),
-            Self::MetricsUpdated => "Metrics Updated".to_string(),
-            Self::CongestionStateUpdated => "Congestion State".to_string(),
-            Self::PacketLost => "Packet Lost".to_string(),
-            Self::TimerUpdated => "Timer Updated".to_string(),
-            Self::Other(name) => name.clone(),
-        }
-    }
-
-    fn display_style(&self) -> MetricsDisplayStyle {
-        // All events display as boxes
-        MetricsDisplayStyle::Box
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MetricsEvent {
-    pub time: f64,
-    pub event_type: MetricsEventType,
-    pub display_text: String,
-    pub detail_text: String, // Full details for popup/tooltip
-    pub color: Color32,
-    pub event_idx: usize,
-    pub display_style: MetricsDisplayStyle,
-    pub file_idx: usize, // Which qlog file this event came from (0=left, 1=right)
-    pub path_id: Option<u64>, // Path ID for multipath visualization
-    // Metric values for graph rendering
-    pub smoothed_rtt: Option<f32>,
-    pub bytes_in_flight: Option<u64>,
-}
-
-struct DualArrow {
-    packet: Arc<PacketInfo>,
-    send_time: f64,
-    recv_time: f64,
-    from_left: bool,
-    is_lost: bool,
-    sent_event_idx: usize,         // Index in the sending file
-    recv_event_idx: Option<usize>, // Index in the receiving file (None if not received)
-}
-
-struct DiagramLayout {
-    left_x: f32,
-    right_x: f32,
-    top_y: f32,
-    rect: Rect,
-}
-
-struct PathLaneLayout {
-    left_lanes: HashMap<u64, f32>,  // path_id -> x position
-    right_lanes: HashMap<u64, f32>, // path_id -> x position
-    #[allow(dead_code)]
-    center_x: f32,
-    use_lanes: bool, // false if too many paths (>4), falls back to color mode
-}
-
-/// Information about a tuple (network path) from TupleAssigned events
-#[derive(Clone, Debug)]
-pub struct TupleInfo {
-    pub tuple_id: String,
-    pub remote_addr: Option<String>, // Formatted as "ip:port"
-    pub local_addr: Option<String>,  // Formatted as "ip:port"
-}
-
-impl TupleInfo {
-    /// Returns a short display string for the remote address
-    #[allow(dead_code)]
-    pub fn remote_display(&self) -> String {
-        self.remote_addr
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-
-    /// Returns true if this appears to be a relayed connection (private IPv6 with port 12345)
-    #[allow(dead_code)]
-    pub fn is_relayed(&self) -> bool {
-        if let Some(ref addr) = self.remote_addr {
-            addr.ends_with(":12345")
-        } else {
-            false
-        }
-    }
-
-    /// Create TupleInfo from a TupleAssigned event
-    pub fn from_tuple_assigned(
-        tuple_id: String,
-        remote: Option<&TupleEndpointInfo>,
-        local: Option<&TupleEndpointInfo>,
-    ) -> Self {
-        Self {
-            tuple_id,
-            remote_addr: remote.and_then(format_endpoint_info),
-            local_addr: local.and_then(format_endpoint_info),
-        }
-    }
-}
-
-/// Format a TupleEndpointInfo into a human-readable address string
-fn format_endpoint_info(info: &TupleEndpointInfo) -> Option<String> {
-    // Prefer IPv4 if available, otherwise use IPv6
-    if let (Some(ip), Some(port)) = (&info.ip_v4, info.port_v4) {
-        Some(format!("{}:{}", ip, port))
-    } else if let (Some(ip), Some(port)) = (&info.ip_v6, info.port_v6) {
-        Some(format!("[{}]:{}", ip, port))
-    } else if let Some(ip) = &info.ip_v4 {
-        Some(ip.clone())
-    } else {
-        info.ip_v6.as_ref().map(|ip| format!("[{}]", ip))
-    }
-}
-
-struct TimeContext<'a> {
-    min_time: f64,
-    max_time: f64,
-    gaps: &'a [TimeGap],
-    pixels_per_ms: f32,
 }
 
 impl Default for SequenceDiagram {
@@ -333,12 +117,14 @@ const EVENT_COLOR_PALETTE: &[Color32] = &[
     Color32::from_rgb(211, 84, 0),    // Dark orange
 ];
 
-impl SequenceDiagram {
-    pub fn invalidate_cache(&mut self) {
+impl CachingVisualization for SequenceDiagram {
+    fn invalidate_cache(&mut self) {
         self.cache = None;
         self.rebuild_arrows = true;
     }
+}
 
+impl SequenceDiagram {
     /// Get or assign a color for an event type name
     fn get_event_color(&mut self, event_name: &str) -> Color32 {
         if let Some(&color) = self.event_color_map.get(event_name) {
@@ -367,7 +153,7 @@ impl SequenceDiagram {
         // Convert all packets to dual arrows (with implied second endpoint)
         if self.rebuild_arrows {
             self.rebuild_arrows = false;
-            self.arrows = Self::build_single_file_arrows(
+            self.arrows = build_single_file_arrows(
                 &cache.left.packets,
                 &(0..cache.left.packets.len()).collect::<Vec<_>>(),
             );
@@ -377,9 +163,9 @@ impl SequenceDiagram {
             return;
         }
 
-        let (min_time, _max_time, time_range) = Self::compute_time_bounds(&self.arrows);
+        let (min_time, _max_time, time_range) = compute_time_bounds(&self.arrows);
         let gaps = if self.compress_gaps {
-            Self::detect_gaps(&self.arrows, min_time, self.dual_time_scale)
+            detect_gaps(&self.arrows, min_time, self.dual_time_scale)
         } else {
             Vec::new()
         };
@@ -425,7 +211,7 @@ impl SequenceDiagram {
 
         if self.rebuild_arrows {
             self.rebuild_arrows = false;
-            self.arrows = Self::build_dual_arrows(cache_left, cache_right);
+            self.arrows = build_dual_arrows(cache_left, cache_right);
             self.metrics_events.clear();
             self.extract_metrics_events(&file_left.qlog_data, false, 0);
             self.extract_metrics_events(&file_right.qlog_data, true, 1);
@@ -436,9 +222,9 @@ impl SequenceDiagram {
             return;
         }
 
-        let (min_time, _max_time, time_range) = Self::compute_time_bounds(&self.arrows);
+        let (min_time, _max_time, time_range) = compute_time_bounds(&self.arrows);
         let gaps = if self.compress_gaps {
-            Self::detect_gaps(&self.arrows, min_time, self.dual_time_scale)
+            detect_gaps(&self.arrows, min_time, self.dual_time_scale)
         } else {
             Vec::new()
         };
@@ -542,212 +328,6 @@ impl SequenceDiagram {
         }
     }
 
-    fn build_single_file_arrows(
-        packets: &[Arc<PacketInfo>],
-        filtered_indices: &[usize],
-    ) -> Vec<DualArrow> {
-        // Convert single-file packets to dual arrows
-        // Sent packets go left->right with implied receiver
-        // Received packets go right->left with implied sender
-        filtered_indices
-            .iter()
-            .filter_map(|&idx| packets.get(idx))
-            .map(|p| {
-                let (from_left, recv_time, recv_event_idx) = match p.direction {
-                    PacketDirection::Sent => {
-                        // Sent: left->right, receiver is implied (no recv event)
-                        (true, p.time + 1.0, None) // Add 1ms for visual arrow length
-                    }
-                    PacketDirection::Received => {
-                        // Received: right->left, this IS the receive event
-                        // Sender is implied, so we show it as sent 1ms earlier
-                        (false, p.time, Some(p.event_idx))
-                    }
-                };
-
-                DualArrow {
-                    packet: p.clone(),
-                    send_time: if from_left { p.time } else { p.time - 1.0 },
-                    recv_time,
-                    from_left,
-                    is_lost: false, // In single-file, we don't know if it's truly lost
-                    sent_event_idx: p.event_idx,
-                    recv_event_idx,
-                }
-            })
-            .collect()
-    }
-
-    fn build_dual_arrows(
-        left_packets: &ExtractedPackets,
-        right_packets: &ExtractedPackets,
-    ) -> Vec<DualArrow> {
-        let left_packets = &left_packets.packets;
-        let right_packets = &right_packets.packets;
-
-        let recv_info = |packets: &[Arc<PacketInfo>]| -> HashMap<(String, u64, u64), (f64, usize)> {
-            packets
-                .iter()
-                .filter(|p| p.direction == PacketDirection::Received)
-                .map(|p| {
-                    (
-                        (
-                            p.packet_type.clone(),
-                            p.packet_number,
-                            p.path_id.unwrap_or(0),
-                        ),
-                        (p.time, p.event_idx),
-                    )
-                })
-                .collect()
-        };
-
-        let left_recv = recv_info(left_packets);
-        let right_recv = recv_info(right_packets);
-
-        let mut arrows: Vec<DualArrow> =
-            Vec::with_capacity(left_packets.len() + right_packets.len());
-
-        for (packets, recv_info, from_left) in [
-            (&left_packets, &right_recv, true),
-            (&right_packets, &left_recv, false),
-        ] {
-            for p in packets
-                .iter()
-                .filter(|p| p.direction == PacketDirection::Sent)
-            {
-                let recv_data = recv_info
-                    .get(&(
-                        p.packet_type.clone(),
-                        p.packet_number,
-                        p.path_id.unwrap_or(0),
-                    ))
-                    .copied();
-
-                let (recv_time, recv_event_idx) = match recv_data {
-                    Some((time, idx)) => (time, Some(idx)),
-                    None => (p.time, None),
-                };
-
-                arrows.push(DualArrow {
-                    packet: p.clone(),
-                    send_time: p.time,
-                    recv_time,
-                    from_left,
-                    is_lost: recv_event_idx.is_none(),
-                    sent_event_idx: p.event_idx,
-                    recv_event_idx,
-                });
-            }
-        }
-
-        arrows.sort_by(|a, b| {
-            a.send_time
-                .partial_cmp(&b.send_time)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        arrows
-    }
-
-    fn compute_time_bounds(arrows: &[DualArrow]) -> (f64, f64, f64) {
-        let min_time = arrows
-            .iter()
-            .map(|a| a.send_time.min(a.recv_time))
-            .fold(f64::MAX, f64::min);
-        let max_time = arrows
-            .iter()
-            .map(|a| a.send_time.max(a.recv_time))
-            .fold(f64::MIN, f64::max);
-        let time_range = (max_time - min_time).max(1.0);
-        (min_time, max_time, time_range)
-    }
-
-    fn detect_gaps(arrows: &[DualArrow], min_time: f64, pixels_per_ms: f32) -> Vec<TimeGap> {
-        if arrows.is_empty() {
-            return Vec::new();
-        }
-
-        let mut event_times: Vec<f64> = arrows
-            .iter()
-            .flat_map(|a| [a.send_time, a.recv_time])
-            .collect();
-        event_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        event_times.dedup();
-
-        // Minimum visual height threshold for compression (in pixels)
-        // Only compress if the gap would be taller than this
-        const MIN_VISUAL_HEIGHT_PX: f32 = 100.0;
-        let min_gap_ms = (MIN_VISUAL_HEIGHT_PX / pixels_per_ms) as f64;
-
-        let mut gaps = Vec::new();
-        let mut prev_time = min_time;
-
-        for &t in &event_times {
-            let gap_size = t - prev_time;
-
-            // Only consider gaps that would be visually significant
-            if gap_size > min_gap_ms {
-                // Check if there are any arrows in flight during this gap
-                let has_in_flight = arrows.iter().any(|arrow| {
-                    let arrow_start = arrow.send_time.min(arrow.recv_time);
-                    let arrow_end = arrow.send_time.max(arrow.recv_time);
-                    // Arrow overlaps with gap if it starts before gap ends AND ends after gap starts
-                    arrow_start < t && arrow_end > prev_time
-                });
-
-                // Only compress if no arrows in flight
-                if !has_in_flight {
-                    // Leave a small amount uncompressed on each side for visual continuity
-                    let keep_visible = GAP_THRESHOLD_MS.min(gap_size * 0.1);
-                    let compressed = gap_size - (keep_visible * 2.0);
-
-                    if compressed > 0.0 {
-                        gaps.push(TimeGap {
-                            start_time: prev_time + keep_visible,
-                            end_time: t - keep_visible,
-                            compressed_amount: compressed,
-                        });
-                    }
-                }
-            }
-            prev_time = t;
-        }
-
-        gaps
-    }
-
-    fn time_to_compressed_y(
-        time: f64,
-        min_time: f64,
-        gaps: &[TimeGap],
-        pixels_per_ms: f32,
-        top_y: f32,
-    ) -> f32 {
-        let mut total_compression = 0.0;
-        for gap in gaps {
-            if time > gap.end_time {
-                total_compression += gap.compressed_amount;
-            } else if time > gap.start_time {
-                let within_gap = time - gap.start_time;
-                let gap_duration = gap.end_time - gap.start_time;
-                total_compression += within_gap / gap_duration * gap.compressed_amount;
-            }
-        }
-        let adjusted_time = time - min_time - total_compression;
-        top_y
-            + (adjusted_time as f32 * pixels_per_ms)
-            + (gaps.iter().filter(|g| time > g.end_time).count() as f32 * COMPRESSED_GAP_HEIGHT)
-    }
-
-    fn compute_compressed_height(time_range: f64, gaps: &[TimeGap], pixels_per_ms: f32) -> f32 {
-        let total_compression: f64 = gaps.iter().map(|g| g.compressed_amount).sum();
-        let compressed_time = time_range - total_compression;
-        (compressed_time as f32 * pixels_per_ms)
-            + (gaps.len() as f32 * COMPRESSED_GAP_HEIGHT)
-            + 100.0
-    }
-
     fn render_controls(&mut self, ui: &mut egui::Ui, time_range: f64) {
         let total_loss_count = self.arrows.iter().filter(|a| a.is_lost).count();
 
@@ -840,7 +420,7 @@ impl SequenceDiagram {
         let total_content_height = if gaps.is_empty() {
             (time_range as f32 * pixels_per_ms) + 100.0
         } else {
-            Self::compute_compressed_height(time_range, gaps, pixels_per_ms)
+            compute_compressed_height(time_range, gaps, pixels_per_ms)
         };
 
         // Capture keyboard input BEFORE ScrollArea consumes it
@@ -939,7 +519,7 @@ impl SequenceDiagram {
                     if gaps.is_empty() {
                         layout.top_y + ((t - min_time) as f32 * pixels_per_ms)
                     } else {
-                        Self::time_to_compressed_y(t, min_time, gaps, pixels_per_ms, layout.top_y)
+                        time_to_compressed_y(t, min_time, gaps, pixels_per_ms, layout.top_y)
                     }
                 };
 
@@ -1021,7 +601,7 @@ impl SequenceDiagram {
                     draw_gap_indicators(&painter, &layout, gaps, &time_to_y);
                 }
 
-                let send_time_counts = Self::count_simultaneous_sends(&self.arrows);
+                let send_time_counts = count_simultaneous_sends(&self.arrows);
                 let arrow_rects = self.draw_dual_arrows(
                     &painter,
                     &layout,
@@ -1059,15 +639,6 @@ impl SequenceDiagram {
                 // Draw metrics events (boxes and markers)
                 self.draw_metrics_events(&painter, ui, &layout, time_to_y, &viewport);
             });
-    }
-
-    fn count_simultaneous_sends(arrows: &[DualArrow]) -> HashMap<i64, usize> {
-        let mut counts: HashMap<i64, usize> = HashMap::new();
-        for arrow in arrows {
-            let key = (arrow.send_time * 1000.0) as i64;
-            *counts.entry(key).or_insert(0) += 1;
-        }
-        counts
     }
 
     fn draw_dual_arrows(
@@ -1629,7 +1200,7 @@ impl SequenceDiagram {
                         if !data.rect.contains(pos) {
                             return None;
                         }
-                        let dist = Self::point_to_line_segment_distance(
+                        let dist = point_to_line_segment_distance(
                             pos.x,
                             pos.y,
                             data.line_start_x,
@@ -1749,37 +1320,6 @@ impl SequenceDiagram {
                 Color32::YELLOW,
             );
         }
-    }
-
-    /// Calculate perpendicular distance from a point to a line segment
-    fn point_to_line_segment_distance(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
-        let dx = x2 - x1;
-        let dy = y2 - y1;
-        let len_sq = dx * dx + dy * dy;
-
-        if len_sq == 0.0 {
-            return ((px - x1).powi(2) + (py - y1).powi(2)).sqrt();
-        }
-
-        let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
-        let t = t.clamp(0.0, 1.0);
-
-        let proj_x = x1 + t * dx;
-        let proj_y = y1 + t * dy;
-
-        ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
-    }
-
-    /// Get a human-readable name for an EventData variant
-    fn event_data_name(data: &EventData) -> String {
-        // Extract the variant name from Debug format
-        let debug_str = format!("{:?}", data);
-        // Take just the variant name (before any parentheses or braces)
-        debug_str
-            .split(['(', '{'])
-            .next()
-            .unwrap_or("Unknown")
-            .to_string()
     }
 
     /// Extract path_id from event - handles both multipath and regular formats
@@ -2109,7 +1649,7 @@ impl SequenceDiagram {
 
                 // Render all other events as boxes
                 other => {
-                    let event_name = Self::event_data_name(other);
+                    let event_name = event_data_name(other);
                     let color = self.get_event_color(&event_name);
                     let event_type = MetricsEventType::Other(event_name.clone());
                     let display_style = event_type.display_style();
@@ -2841,18 +2381,6 @@ impl SequenceDiagram {
         }
     }
 
-    fn format_bytes(bytes: u64) -> String {
-        if bytes < 1024 {
-            format!("{}B", bytes)
-        } else if bytes < 1024 * 1024 {
-            format!("{:.1}KiB", bytes as f64 / 1024.0)
-        } else if bytes < 1024 * 1024 * 1024 {
-            format!("{:.1}MiB", bytes as f64 / (1024.0 * 1024.0))
-        } else {
-            format!("{:.1}GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn draw_metric_strip(
         painter: &Painter,
@@ -2958,7 +2486,7 @@ impl SequenceDiagram {
                     .order(egui::Order::Tooltip)
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.label(format!("{}: {}", label, Self::format_bytes(value)));
+                            ui.label(format!("{}: {}", label, format_bytes(value)));
                         });
                     });
             }
@@ -2969,7 +2497,7 @@ impl SequenceDiagram {
         painter.text(
             egui::Pos2::new(x + width - 8.0, label_y),
             egui::Align2::RIGHT_BOTTOM,
-            Self::format_bytes(max_value),
+            format_bytes(max_value),
             egui::FontId::proportional(10.0),
             Color32::LIGHT_GRAY,
         );
@@ -3105,605 +2633,6 @@ impl SequenceDiagram {
             Color32::LIGHT_GRAY,
         );
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_header(
-    painter: &Painter,
-    layout: &DiagramLayout,
-    viewport: Rect,
-    width: f32,
-    fill: Color32,
-    left_label: &str,
-    right_label: &str,
-    left_color: Color32,
-    right_color: Color32,
-) {
-    let header_y = layout.rect.top() + viewport.top() + 18.0;
-    painter.rect_filled(
-        Rect::from_min_size(
-            Pos2::new(layout.rect.left(), layout.rect.top() + viewport.top()),
-            Vec2::new(width, 40.0),
-        ),
-        0.0,
-        fill,
-    );
-    painter.text(
-        Pos2::new(layout.left_x, header_y),
-        egui::Align2::CENTER_CENTER,
-        left_label,
-        egui::FontId::proportional(14.0),
-        left_color,
-    );
-    painter.text(
-        Pos2::new(layout.right_x, header_y),
-        egui::Align2::CENTER_CENTER,
-        right_label,
-        egui::FontId::proportional(14.0),
-        right_color,
-    );
-}
-
-fn draw_timelines(painter: &Painter, layout: &DiagramLayout, top: f32, bottom: f32) {
-    for x in [layout.left_x, layout.right_x] {
-        painter.line_segment(
-            [Pos2::new(x, top), Pos2::new(x, bottom)],
-            Stroke::new(2.0, Color32::GRAY),
-        );
-    }
-}
-
-fn draw_lane_timelines(
-    painter: &Painter,
-    _layout: &DiagramLayout,
-    top: f32,
-    bottom: f32,
-    lanes: &PathLaneLayout,
-) {
-    // Draw timelines and labels for each lane
-    for (&path_id, &x) in lanes.left_lanes.iter() {
-        painter.line_segment(
-            [Pos2::new(x, top), Pos2::new(x, bottom)],
-            Stroke::new(1.5, Color32::from_rgb(100, 100, 100)),
-        );
-        // Draw path label at top
-        painter.text(
-            Pos2::new(x, top - 15.0),
-            egui::Align2::CENTER_BOTTOM,
-            format!("Path {}", path_id),
-            egui::FontId::proportional(10.0),
-            Color32::LIGHT_GRAY,
-        );
-    }
-    for (&path_id, &x) in lanes.right_lanes.iter() {
-        painter.line_segment(
-            [Pos2::new(x, top), Pos2::new(x, bottom)],
-            Stroke::new(1.5, Color32::from_rgb(100, 100, 100)),
-        );
-        // Draw path label at top
-        painter.text(
-            Pos2::new(x, top - 15.0),
-            egui::Align2::CENTER_BOTTOM,
-            format!("Path {}", path_id),
-            egui::FontId::proportional(10.0),
-            Color32::LIGHT_GRAY,
-        );
-    }
-}
-
-fn draw_gap_indicators<F>(
-    painter: &Painter,
-    layout: &DiagramLayout,
-    gaps: &[TimeGap],
-    time_to_y: &F,
-) where
-    F: Fn(f64) -> f32,
-{
-    let gap_color = Color32::from_rgb(180, 160, 80);
-    let text_color = Color32::from_rgb(150, 150, 150);
-
-    for gap in gaps {
-        let y_pos = time_to_y(gap.start_time);
-        let end_y = y_pos + COMPRESSED_GAP_HEIGHT;
-        let center_y = y_pos + COMPRESSED_GAP_HEIGHT / 2.0;
-
-        // Draw a subtle background rect spanning between the two timelines
-        let bg_rect = Rect::from_min_max(
-            Pos2::new(layout.left_x, y_pos),
-            Pos2::new(layout.right_x, end_y),
-        );
-        painter.rect_filled(
-            bg_rect,
-            0.0,
-            Color32::from_rgba_unmultiplied(180, 160, 80, 20),
-        );
-
-        // Draw highlighted sections on the timelines
-        for x in [layout.left_x, layout.right_x] {
-            painter.line_segment(
-                [Pos2::new(x, y_pos), Pos2::new(x, end_y)],
-                Stroke::new(6.0, gap_color),
-            );
-        }
-
-        // Draw "compressed" label in the center
-        let center_x = (layout.left_x + layout.right_x) / 2.0;
-        let label = format!("compressed {:.1}ms", gap.compressed_amount);
-        painter.text(
-            Pos2::new(center_x, center_y),
-            egui::Align2::CENTER_CENTER,
-            &label,
-            egui::FontId::proportional(12.0),
-            text_color,
-        );
-
-        // Draw time range inside sequence diagram on right side
-        let right_text_x = layout.right_x - 10.0;
-        let start_label = format!("{:.1}ms", gap.start_time);
-        let end_label = format!("{:.1}ms", gap.end_time);
-        painter.text(
-            Pos2::new(right_text_x, y_pos + 5.0),
-            egui::Align2::RIGHT_TOP,
-            &start_label,
-            egui::FontId::proportional(9.0),
-            Color32::from_rgb(120, 120, 120),
-        );
-        painter.text(
-            Pos2::new(right_text_x, end_y - 5.0),
-            egui::Align2::RIGHT_BOTTOM,
-            &end_label,
-            egui::FontId::proportional(9.0),
-            Color32::from_rgb(120, 120, 120),
-        );
-    }
-}
-
-fn draw_frame_tags(
-    painter: &Painter,
-    frames: &[FrameType],
-    line_start: Pos2,
-    line_end: Pos2,
-    _arrow_idx: usize,
-    is_selected: bool,
-    has_selection: bool,
-) {
-    if frames.is_empty() {
-        return;
-    }
-
-    // Group frames by type and count duplicates
-    let mut grouped: Vec<(&FrameType, usize)> = Vec::new();
-    for frame in frames {
-        if let Some(last) = grouped.last_mut() {
-            if last.0.display_name() == frame.display_name() {
-                last.1 += 1;
-                continue;
-            }
-        }
-        grouped.push((frame, 1));
-    }
-
-    // Calculate line properties
-    let dx = line_end.x - line_start.x;
-    let dy = line_end.y - line_start.y;
-    let line_len = (dx * dx + dy * dy).sqrt();
-    if line_len < 1.0 {
-        return;
-    }
-
-    // Unit vector along the line
-    let ux = dx / line_len;
-    let uy = dy / line_len;
-
-    // Perpendicular vector (for row offset)
-    // Positive = "above" the line (in screen coords, depends on line direction)
-    let px = -uy;
-    let py = ux;
-
-    let tag_height = 16.0;
-    let tag_gap = 4.0;
-
-    // Calculate tag widths based on content
-    let tag_data: Vec<(String, Color32, f32)> = grouped
-        .iter()
-        .map(|(frame, count)| {
-            let text = if *count > 1 {
-                format!("{} x{}", frame.display_name(), count)
-            } else {
-                frame.display_name()
-            };
-            // Estimate width based on text length
-            let width = (text.len() as f32 * 6.0 + 12.0).clamp(50.0, 120.0);
-            (text, frame.color(), width)
-        })
-        .collect();
-
-    let num_tags = tag_data.len();
-
-    // Calculate total width needed
-    let total_width: f32 = tag_data.iter().map(|(_, _, w)| w + tag_gap).sum::<f32>() - tag_gap;
-
-    // Center point of the line
-    let mid_x = (line_start.x + line_end.x) / 2.0;
-    let mid_y = (line_start.y + line_end.y) / 2.0;
-
-    // Alternate perpendicular offset based on arrow index to reduce overlap
-    // Even-indexed arrows get tags on one side, odd-indexed on the other
-    // Frame tags always BELOW the line (negative perpendicular offset)
-    // Packet labels go ABOVE (positive perpendicular offset)
-    let base_perp_offset = -18.0;
-
-    // Calculate how many tags fit per row
-    let available_len = line_len * 0.8;
-    let fits_in_one_row = total_width <= available_len;
-
-    let row_spacing = tag_height + 2.0;
-
-    if fits_in_one_row || num_tags <= 2 {
-        // Single row layout
-        let start_offset = -total_width / 2.0;
-        let mut current_offset = start_offset;
-
-        for (text, color, width) in &tag_data {
-            let along_offset = current_offset + width / 2.0;
-
-            let tag_center_x = mid_x + along_offset * ux + base_perp_offset * px;
-            let tag_center_y = mid_y + along_offset * uy + base_perp_offset * py;
-
-            let tag_rect = Rect::from_center_size(
-                Pos2::new(tag_center_x, tag_center_y),
-                Vec2::new(*width, tag_height),
-            );
-
-            let (bg_color, text_color) = if is_selected {
-                (*color, Color32::WHITE)
-            } else if has_selection {
-                (
-                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 40),
-                )
-            } else {
-                (*color, Color32::WHITE)
-            };
-
-            // Draw shadow for selected tags
-            if is_selected {
-                let shadow_offset = 2.0;
-                let shadow_rect = Rect::from_center_size(
-                    Pos2::new(tag_center_x + shadow_offset, tag_center_y + shadow_offset),
-                    Vec2::new(*width, tag_height),
-                );
-                painter.rect_filled(
-                    shadow_rect,
-                    2.0,
-                    Color32::from_rgba_unmultiplied(0, 0, 0, 80),
-                );
-            }
-
-            painter.rect_filled(tag_rect, 2.0, bg_color);
-            painter.text(
-                tag_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                text,
-                egui::FontId::proportional(10.0),
-                text_color,
-            );
-
-            current_offset += width + tag_gap;
-        }
-    } else {
-        // Two row layout
-        let half = num_tags.div_ceil(2);
-        let rows: Vec<&[(String, Color32, f32)]> = vec![&tag_data[..half], &tag_data[half..]];
-
-        for (row_idx, row_tags) in rows.iter().enumerate() {
-            let row_width: f32 =
-                row_tags.iter().map(|(_, _, w)| w + tag_gap).sum::<f32>() - tag_gap;
-            let start_offset = -row_width / 2.0;
-            let mut current_offset = start_offset;
-
-            // Stack rows below the line (negative direction)
-            let row_perp_offset = base_perp_offset - (row_idx as f32) * row_spacing;
-
-            for (text, color, width) in *row_tags {
-                let along_offset = current_offset + width / 2.0;
-
-                let tag_center_x = mid_x + along_offset * ux + row_perp_offset * px;
-                let tag_center_y = mid_y + along_offset * uy + row_perp_offset * py;
-
-                let tag_rect = Rect::from_center_size(
-                    Pos2::new(tag_center_x, tag_center_y),
-                    Vec2::new(*width, tag_height),
-                );
-
-                let (bg_color, text_color) = if is_selected {
-                    (*color, Color32::WHITE)
-                } else if has_selection {
-                    (
-                        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40),
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 40),
-                    )
-                } else {
-                    (*color, Color32::WHITE)
-                };
-
-                // Draw shadow for selected tags
-                if is_selected {
-                    let shadow_offset = 2.0;
-                    let shadow_rect = Rect::from_center_size(
-                        Pos2::new(tag_center_x + shadow_offset, tag_center_y + shadow_offset),
-                        Vec2::new(*width, tag_height),
-                    );
-                    painter.rect_filled(
-                        shadow_rect,
-                        2.0,
-                        Color32::from_rgba_unmultiplied(0, 0, 0, 80),
-                    );
-                }
-
-                painter.rect_filled(tag_rect, 2.0, bg_color);
-                painter.text(
-                    tag_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    text,
-                    egui::FontId::proportional(10.0),
-                    text_color,
-                );
-
-                current_offset += width + tag_gap;
-            }
-        }
-    }
-}
-
-fn draw_time_markers(
-    painter: &Painter,
-    layout: &DiagramLayout,
-    viewport: &Rect,
-    total_height: f32,
-    time_ctx: &TimeContext,
-) {
-    let target_markers = 6;
-    let step_pixels = viewport.height() / target_markers as f32;
-    let marker_color = Color32::from_rgb(140, 140, 140);
-    let max_markers = (total_height / step_pixels).ceil() as usize + 1;
-
-    for i in 0..max_markers {
-        let visual_offset = i as f32 * step_pixels;
-        let y = layout.top_y + visual_offset;
-
-        let mut time = time_ctx.min_time + (visual_offset / time_ctx.pixels_per_ms) as f64;
-
-        let mut compression_before = 0.0;
-        for gap in time_ctx.gaps {
-            let gap_visual_start = (gap.start_time - time_ctx.min_time - compression_before) as f32
-                * time_ctx.pixels_per_ms
-                + (time_ctx
-                    .gaps
-                    .iter()
-                    .take_while(|g| g.end_time <= gap.start_time)
-                    .count() as f32
-                    * COMPRESSED_GAP_HEIGHT);
-
-            if visual_offset > gap_visual_start {
-                time += gap.compressed_amount;
-            }
-            compression_before += gap.compressed_amount;
-        }
-
-        time = time.clamp(time_ctx.min_time, time_ctx.max_time);
-
-        let decimals = if time < 1.0 {
-            2
-        } else if time < 100.0 {
-            1
-        } else {
-            0
-        };
-        let label = format!("{:.prec$}", time, prec = decimals);
-
-        painter.text(
-            Pos2::new(layout.left_x - 15.0, y),
-            egui::Align2::RIGHT_CENTER,
-            &label,
-            egui::FontId::proportional(10.0),
-            marker_color,
-        );
-
-        painter.text(
-            Pos2::new(layout.right_x + 15.0, y),
-            egui::Align2::LEFT_CENTER,
-            &label,
-            egui::FontId::proportional(10.0),
-            marker_color,
-        );
-    }
-}
-
-/// Draw text positioned along a line direction
-/// Note: egui doesn't support rotated text, so we keep text horizontal
-/// but position it centered at the given point
-fn draw_rotated_text(
-    painter: &Painter,
-    center: Pos2,
-    _angle: f32, // Reserved for future use if egui adds rotation support
-    text: &str,
-    font: egui::FontId,
-    color: Color32,
-) {
-    painter.text(center, egui::Align2::CENTER_CENTER, text, font, color);
-}
-
-fn draw_arrowhead(painter: &Painter, from: Pos2, to: Pos2, color: Color32, size: f32) {
-    let dx = to.x - from.x;
-    let dy = to.y - from.y;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1.0 {
-        return;
-    }
-
-    let ux = dx / len;
-    let uy = dy / len;
-
-    let px = -uy;
-    let py = ux;
-
-    let tip = to;
-    let left = Pos2::new(
-        tip.x - ux * size + px * size * 0.6,
-        tip.y - uy * size + py * size * 0.6,
-    );
-    let right = Pos2::new(
-        tip.x - ux * size - px * size * 0.6,
-        tip.y - uy * size - py * size * 0.6,
-    );
-
-    painter.add(egui::Shape::convex_polygon(
-        vec![tip, left, right],
-        color,
-        Stroke::NONE,
-    ));
-}
-
-fn draw_loss_marker(painter: &Painter, center: Pos2, size: f32) {
-    let box_rect = Rect::from_center_size(center, Vec2::new(size * 1.5, size));
-
-    painter.rect_filled(
-        box_rect,
-        2.0,
-        Color32::from_rgba_unmultiplied(255, 0, 0, 80),
-    );
-
-    let hatch_stroke = Stroke::new(1.0, Color32::from_rgb(180, 50, 50));
-    let step = 3.0;
-    let (left, right, top, bottom) = (
-        box_rect.left(),
-        box_rect.right(),
-        box_rect.top(),
-        box_rect.bottom(),
-    );
-
-    let mut x = left;
-    while x < right + (bottom - top) {
-        let x1 = x.max(left);
-        let y1 = (top + (x1 - x)).clamp(top, bottom);
-        let x2 = (x + (bottom - top)).min(right);
-        let y2 = (bottom - (right - x2).max(0.0)).clamp(top, bottom);
-
-        if x1 < right && x2 > left {
-            painter.line_segment([Pos2::new(x1, y1), Pos2::new(x2, y2)], hatch_stroke);
-        }
-        x += step;
-    }
-
-    painter.rect_stroke(
-        box_rect,
-        2.0,
-        Stroke::new(1.5, LOSS_COLOR),
-        StrokeKind::Inside,
-    );
-
-    let x_size = size * 0.4;
-    for (dx, dy) in [(1.0, 1.0), (1.0, -1.0)] {
-        painter.line_segment(
-            [
-                Pos2::new(center.x - x_size, center.y - x_size * dy),
-                Pos2::new(center.x + x_size, center.y + x_size * dy * dx),
-            ],
-            Stroke::new(2.0, LOSS_COLOR),
-        );
-    }
-}
-
-#[derive(Default)]
-struct ExtractedPackets {
-    packets: Vec<Arc<PacketInfo>>,
-    packet_types: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum PacketDirection {
-    Sent,
-    Received,
-}
-
-fn draw_path_legend(painter: &Painter, rect: Rect, viewport: Rect, path_ids: &[u64]) {
-    if path_ids.is_empty() || path_ids.len() == 1 {
-        // Don't show legend for single path
-        return;
-    }
-
-    let legend_width = 100.0;
-    let legend_height = (path_ids.len() as f32 * 22.0) + 12.0;
-    let margin = 10.0;
-
-    // Position in top-right corner relative to viewport
-    let legend_x = rect.right() + viewport.right() - legend_width - margin;
-    let legend_y = rect.top() + viewport.top() + margin;
-
-    let legend_rect = Rect::from_min_size(
-        Pos2::new(legend_x, legend_y),
-        Vec2::new(legend_width, legend_height),
-    );
-
-    // Background
-    painter.rect_filled(
-        legend_rect,
-        4.0,
-        Color32::from_rgba_unmultiplied(40, 40, 45, 230),
-    );
-    painter.rect_stroke(
-        legend_rect,
-        4.0,
-        Stroke::new(1.0, Color32::from_rgb(80, 80, 85)),
-        StrokeKind::Inside,
-    );
-
-    // Title
-    painter.text(
-        Pos2::new(legend_x + 8.0, legend_y + 8.0),
-        egui::Align2::LEFT_TOP,
-        "Paths",
-        egui::FontId::proportional(10.0),
-        Color32::LIGHT_GRAY,
-    );
-
-    // Path entries
-    for (i, &path_id) in path_ids.iter().enumerate() {
-        let y = legend_y + 24.0 + (i as f32 * 22.0);
-        let color = path_color(path_id);
-
-        // Color box
-        let box_rect = Rect::from_min_size(Pos2::new(legend_x + 8.0, y), Vec2::new(14.0, 14.0));
-        painter.rect_filled(box_rect, 2.0, color);
-        painter.rect_stroke(
-            box_rect,
-            2.0,
-            Stroke::new(1.0, Color32::from_rgb(60, 60, 65)),
-            StrokeKind::Inside,
-        );
-
-        // Path ID label
-        painter.text(
-            Pos2::new(legend_x + 28.0, y + 7.0),
-            egui::Align2::LEFT_CENTER,
-            format!("Path {}", path_id),
-            egui::FontId::proportional(10.0),
-            Color32::LIGHT_GRAY,
-        );
-    }
-}
-
-struct PacketInfo {
-    time: f64,
-    direction: PacketDirection,
-    packet_type: String,
-    packet_type_short: String,
-    packet_number: u64,
-    path_id: Option<u64>,
-    tuple_id: Option<String>,
-    frames: Vec<FrameType>,
-    event_idx: usize,
 }
 
 struct Cache {

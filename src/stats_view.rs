@@ -1,3 +1,4 @@
+use crate::constants::DEFAULT_PACKET_SIZE;
 use crate::packet_correlation::PacketCorrelation;
 use crate::qlog_data::QlogData;
 use crate::utils::format_bytes;
@@ -79,11 +80,9 @@ impl ConnectionStats {
                             data.frames
                                 .as_ref()
                                 .map(|frames| {
-                                    frames.iter().fold(0u64, |acc, frame| {
-                                        acc + Self::estimate_frame_size(frame)
-                                    }) + 20 // Add header overhead estimate
+                                    frames.iter().map(Self::estimate_frame_size).sum::<u64>() + 20
                                 })
-                                .unwrap_or(1200) // Default QUIC packet size
+                                .unwrap_or(DEFAULT_PACKET_SIZE)
                         });
                     stats.bytes_sent += packet_bytes;
 
@@ -110,11 +109,9 @@ impl ConnectionStats {
                             data.frames
                                 .as_ref()
                                 .map(|frames| {
-                                    frames.iter().fold(0u64, |acc, frame| {
-                                        acc + Self::estimate_frame_size(frame)
-                                    }) + 20
+                                    frames.iter().map(Self::estimate_frame_size).sum::<u64>() + 20
                                 })
-                                .unwrap_or(1200)
+                                .unwrap_or(DEFAULT_PACKET_SIZE)
                         });
                     stats.bytes_received += packet_bytes;
 
