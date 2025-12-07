@@ -2004,12 +2004,12 @@ fn render_tuple_assigned(
 
     if let Some(ref local) = tuple.tuple_local {
         ui.label(RichText::new("Local").strong());
-        render_tuple_endpoint_info(ui, &local, &format!("local-{id_prefix}"), idx);
+        render_tuple_endpoint_info(ui, local, &format!("local-{id_prefix}"), idx);
         ui.add_space(5.);
     }
     if let Some(ref remote) = tuple.tuple_remote {
         ui.label(RichText::new("Remote").strong());
-        render_tuple_endpoint_info(ui, &remote, &format!("remote-{id_prefix}"), idx);
+        render_tuple_endpoint_info(ui, remote, &format!("remote-{id_prefix}"), idx);
     }
 }
 
