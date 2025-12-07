@@ -456,7 +456,7 @@ impl PacketizationDiagram {
                     let x_start = draw_left + (frame.start_byte as f64 / bytes_per_pixel) as f32;
                     let x_end = draw_left + (frame.end_byte as f64 / bytes_per_pixel) as f32;
                     let width = (x_end - x_start).max(1.0);
-                    let color = frame.frame_type.packetization_color();
+                    let color = frame.frame_type.color();
 
                     let frame_rect = Rect::from_min_size(
                         Pos2::new(x_start, lane_y + 2.0),

@@ -233,20 +233,6 @@ impl FrameType {
         }
     }
 
-    /// Alternative color scheme for packetization diagram.
-    pub fn packetization_color(&self) -> Color32 {
-        match self {
-            Self::Stream(_) => Color32::from_rgb(255, 80, 80),
-            Self::Crypto => Color32::from_rgb(255, 150, 150),
-            Self::Ack => Color32::from_rgb(180, 180, 180),
-            Self::Padding => Color32::from_rgb(100, 100, 100),
-            Self::MaxData | Self::MaxStreamData => Color32::from_rgb(150, 200, 255),
-            Self::HandshakeDone => Color32::from_rgb(150, 255, 150),
-            Self::ConnectionClose => Color32::from_rgb(255, 100, 100),
-            _ => Color32::from_rgb(200, 200, 200),
-        }
-    }
-
     /// Check if this frame type is a stream frame.
     pub fn is_stream(&self) -> bool {
         matches!(self, Self::Stream(_))
