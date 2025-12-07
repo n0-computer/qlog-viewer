@@ -1,6 +1,7 @@
+use crate::constants::DEFAULT_PACKET_SIZE;
 use crate::packet_correlation::PacketCorrelation;
 use crate::qlog_data::QlogData;
-use crate::utils::format_bytes;
+use crate::utils::{format_bytes, get_event_path_id};
 use egui::Color32;
 use egui_plot::{Line, Plot, PlotPoints, Polygon, VLine};
 use qlog::events::EventData;
@@ -322,18 +323,7 @@ impl CongestionGraph {
         for event in qlog_data.events.iter() {
             let time = event.time as f64;
 
-            // Filter by path_id
-            let event_path_id = match &event.data {
-                EventData::PacketSent(data) => data.header.path_id.unwrap_or(0),
-                EventData::PacketReceived(data) => data.header.path_id.unwrap_or(0),
-                EventData::PacketLost(data) => {
-                    data.header.as_ref().and_then(|h| h.path_id).unwrap_or(0)
-                }
-                EventData::MetricsUpdated(data) => data.path_id.unwrap_or(0),
-                _ => continue,
-            };
-
-            // Skip events from different paths
+            let event_path_id = get_event_path_id(&event.data);
             if event_path_id != path_id {
                 continue;
             }
@@ -364,18 +354,26 @@ impl CongestionGraph {
                 }
                 EventData::PacketSent(data) => {
                     packets_sent += 1;
-                    let packet_size = data.raw.as_ref().and_then(|r| r.length).unwrap_or(1200);
+                    let packet_size = data
+                        .raw
+                        .as_ref()
+                        .and_then(|r| r.length)
+                        .unwrap_or(DEFAULT_PACKET_SIZE);
                     cumulative_sent += packet_size;
                     data_sent_points.push([time, cumulative_sent as f64]);
                 }
                 EventData::PacketReceived(data) => {
                     packets_acked += 1;
-                    let packet_size = data.raw.as_ref().and_then(|r| r.length).unwrap_or(1200);
+                    let packet_size = data
+                        .raw
+                        .as_ref()
+                        .and_then(|r| r.length)
+                        .unwrap_or(DEFAULT_PACKET_SIZE);
                     cumulative_acked += packet_size;
                     data_acked_points.push([time, cumulative_acked as f64]);
                 }
                 EventData::PacketLost(_data) => {
-                    cumulative_lost += 1200;
+                    cumulative_lost += DEFAULT_PACKET_SIZE;
                     data_lost_points.push([time, cumulative_lost as f64]);
                 }
                 _ => {}

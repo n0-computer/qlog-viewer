@@ -1,5 +1,10 @@
 use egui::Color32;
-use qlog::events::quic::{AckedRanges, QuicFrame};
+use qlog::events::{
+    quic::{AckedRanges, QuicFrame},
+    EventData,
+};
+
+use crate::constants::DEFAULT_PATH_ID;
 
 /// QUIC frame types for display and coloring.
 #[derive(Debug, Clone, PartialEq)]
@@ -395,5 +400,20 @@ pub fn format_acked_ranges(ranges: &AckedRanges) -> String {
             })
             .collect::<Vec<_>>()
             .join(", "),
+    }
+}
+
+/// Extract path_id from an EventData, returning DEFAULT_PATH_ID if not applicable.
+pub fn get_event_path_id(event_data: &EventData) -> u64 {
+    match event_data {
+        EventData::PacketSent(data) => data.header.path_id.unwrap_or(DEFAULT_PATH_ID),
+        EventData::PacketReceived(data) => data.header.path_id.unwrap_or(DEFAULT_PATH_ID),
+        EventData::PacketLost(data) => data
+            .header
+            .as_ref()
+            .and_then(|h| h.path_id)
+            .unwrap_or(DEFAULT_PATH_ID),
+        EventData::MetricsUpdated(data) => data.path_id.unwrap_or(DEFAULT_PATH_ID),
+        _ => DEFAULT_PATH_ID,
     }
 }

@@ -1,11 +1,15 @@
 mod app;
 mod congestion_graph;
+mod constants;
+mod event_detail_ui;
 mod multiplexing_diagram;
 mod packet_correlation;
 mod packetization_diagram;
 mod qlog_data;
 mod sequence_diagram;
 mod stats_view;
+mod time_compression;
+mod types;
 mod utils;
 
 use app::QlogViewerApp;

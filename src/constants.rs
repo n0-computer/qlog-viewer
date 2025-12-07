@@ -1,0 +1,3 @@
+pub const DEFAULT_PACKET_SIZE: u64 = 1200;
+pub const DEFAULT_FRAME_LENGTH: u64 = 1000;
+pub const DEFAULT_PATH_ID: u64 = 0;

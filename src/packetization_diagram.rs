@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
+use crate::constants::{DEFAULT_FRAME_LENGTH, DEFAULT_PACKET_SIZE, DEFAULT_PATH_ID};
 use crate::qlog_data::QlogData;
+use crate::types::CachingVisualization;
 use crate::utils::{self, FrameType};
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use qlog::events::{quic::QuicFrame, EventData};
@@ -22,6 +24,14 @@ pub struct PacketizationDiagram {
     scroll_fraction: f32, // 0.0 to 1.0, synced scroll position
 }
 
+impl CachingVisualization for PacketizationDiagram {
+    fn invalidate_cache(&mut self) {
+        self.cache_valid = false;
+        self.sent_data.clear();
+        self.received_data.clear();
+    }
+}
+
 impl PacketizationDiagram {
     pub fn new() -> Self {
         Self {
@@ -35,12 +45,6 @@ impl PacketizationDiagram {
             sync_scroll: false,
             scroll_fraction: 0.0,
         }
-    }
-
-    pub fn invalidate_cache(&mut self) {
-        self.cache_valid = false;
-        self.sent_data.clear();
-        self.received_data.clear();
     }
 
     pub fn show(
@@ -694,128 +698,109 @@ impl PacketizationDiagram {
         for (event_idx, event) in qlog_data.events.iter().enumerate() {
             match &event.data {
                 EventData::PacketSent(data) => {
-                    let path_id = data.header.path_id.unwrap_or(0);
-                    let size = data.raw.as_ref().and_then(|r| r.length).unwrap_or(1200);
-                    let offset = sent_offsets.entry(path_id).or_insert(0);
-                    let start = *offset;
-                    let end = start + size;
-                    let packet_number = data.header.packet_number.unwrap_or(0);
-                    let packet_type = format!("{:?}", data.header.packet_type);
-
-                    let path_data = sent.entry(path_id).or_insert_with(ByteStreamData::new);
-                    path_data.packets.push(PacketRange {
-                        start_byte: start,
-                        end_byte: end,
-                        packet_number,
-                        packet_type,
-                        size,
+                    Self::process_packet(
+                        data.header.path_id.unwrap_or(DEFAULT_PATH_ID),
+                        data.raw
+                            .as_ref()
+                            .and_then(|r| r.length)
+                            .unwrap_or(DEFAULT_PACKET_SIZE),
+                        data.header.packet_number.unwrap_or(0),
+                        format!("{:?}", data.header.packet_type),
+                        data.frames.as_deref(),
                         event_idx,
-                    });
-                    path_data.packet_count += 1;
-
-                    if let Some(ref frames) = data.frames {
-                        let frame_count = frames.len();
-                        let frame_size = if frame_count > 0 {
-                            size / frame_count as u64
-                        } else {
-                            size
-                        };
-                        let mut frame_offset = start;
-
-                        for frame in frames.iter() {
-                            let actual_size = utils::get_frame_size(frame).unwrap_or(frame_size);
-                            let frame_end = (frame_offset + actual_size).min(end);
-                            let clamped_size = frame_end - frame_offset;
-
-                            path_data.frames.push(FrameRange {
-                                start_byte: frame_offset,
-                                end_byte: frame_end,
-                                frame_type: FrameType::from_quic_frame(frame),
-                                size: clamped_size,
-                                stream_id: utils::get_frame_stream_id(frame),
-                                event_idx,
-                            });
-
-                            if let QuicFrame::Stream { stream_id, raw, .. } = frame {
-                                let length = raw.as_ref().and_then(|r| r.length).unwrap_or(1000);
-                                path_data
-                                    .stream_ranges
-                                    .entry(*stream_id)
-                                    .or_default()
-                                    .push((frame_offset, frame_offset + length, event_idx));
-                            }
-
-                            frame_offset = frame_end;
-                        }
-                    }
-
-                    *offset = end;
-                    path_data.total_bytes = end;
+                        &mut sent_offsets,
+                        &mut sent,
+                    );
                 }
                 EventData::PacketReceived(data) => {
-                    let path_id = data.header.path_id.unwrap_or(0);
-                    let size = data.raw.as_ref().and_then(|r| r.length).unwrap_or(1200);
-                    let offset = recv_offsets.entry(path_id).or_insert(0);
-                    let start = *offset;
-                    let end = start + size;
-                    let packet_number = data.header.packet_number.unwrap_or(0);
-                    let packet_type = format!("{:?}", data.header.packet_type);
-
-                    let path_data = received.entry(path_id).or_insert_with(ByteStreamData::new);
-                    path_data.packets.push(PacketRange {
-                        start_byte: start,
-                        end_byte: end,
-                        packet_number,
-                        packet_type,
-                        size,
+                    Self::process_packet(
+                        data.header.path_id.unwrap_or(DEFAULT_PATH_ID),
+                        data.raw
+                            .as_ref()
+                            .and_then(|r| r.length)
+                            .unwrap_or(DEFAULT_PACKET_SIZE),
+                        data.header.packet_number.unwrap_or(0),
+                        format!("{:?}", data.header.packet_type),
+                        data.frames.as_deref(),
                         event_idx,
-                    });
-                    path_data.packet_count += 1;
-
-                    if let Some(ref frames) = data.frames {
-                        let frame_count = frames.len();
-                        let frame_size = if frame_count > 0 {
-                            size / frame_count as u64
-                        } else {
-                            size
-                        };
-                        let mut frame_offset = start;
-
-                        for frame in frames.iter() {
-                            let actual_size = utils::get_frame_size(frame).unwrap_or(frame_size);
-                            let frame_end = (frame_offset + actual_size).min(end);
-                            let clamped_size = frame_end - frame_offset;
-
-                            path_data.frames.push(FrameRange {
-                                start_byte: frame_offset,
-                                end_byte: frame_end,
-                                frame_type: FrameType::from_quic_frame(frame),
-                                size: clamped_size,
-                                stream_id: utils::get_frame_stream_id(frame),
-                                event_idx,
-                            });
-
-                            if let QuicFrame::Stream { stream_id, raw, .. } = frame {
-                                let length = raw.as_ref().and_then(|r| r.length).unwrap_or(1000);
-                                path_data
-                                    .stream_ranges
-                                    .entry(*stream_id)
-                                    .or_default()
-                                    .push((frame_offset, frame_offset + length, event_idx));
-                            }
-
-                            frame_offset = frame_end;
-                        }
-                    }
-
-                    *offset = end;
-                    path_data.total_bytes = end;
+                        &mut recv_offsets,
+                        &mut received,
+                    );
                 }
                 _ => {}
             }
         }
 
         (sent, received)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process_packet(
+        path_id: u64,
+        size: u64,
+        packet_number: u64,
+        packet_type: String,
+        frames: Option<&[QuicFrame]>,
+        event_idx: usize,
+        offsets: &mut HashMap<u64, u64>,
+        data_map: &mut HashMap<u64, ByteStreamData>,
+    ) {
+        let offset = offsets.entry(path_id).or_insert(0);
+        let start = *offset;
+        let end = start + size;
+
+        let path_data = data_map.entry(path_id).or_insert_with(ByteStreamData::new);
+        path_data.packets.push(PacketRange {
+            start_byte: start,
+            end_byte: end,
+            packet_number,
+            packet_type,
+            size,
+            event_idx,
+        });
+        path_data.packet_count += 1;
+
+        if let Some(frames) = frames {
+            let frame_count = frames.len();
+            let frame_size = if frame_count > 0 {
+                size / frame_count as u64
+            } else {
+                size
+            };
+            let mut frame_offset = start;
+
+            for frame in frames.iter() {
+                let actual_size = utils::get_frame_size(frame).unwrap_or(frame_size);
+                let frame_end = (frame_offset + actual_size).min(end);
+                let clamped_size = frame_end - frame_offset;
+
+                path_data.frames.push(FrameRange {
+                    start_byte: frame_offset,
+                    end_byte: frame_end,
+                    frame_type: FrameType::from_quic_frame(frame),
+                    size: clamped_size,
+                    stream_id: utils::get_frame_stream_id(frame),
+                    event_idx,
+                });
+
+                if let QuicFrame::Stream { stream_id, raw, .. } = frame {
+                    let length = raw
+                        .as_ref()
+                        .and_then(|r| r.length)
+                        .unwrap_or(DEFAULT_FRAME_LENGTH);
+                    path_data
+                        .stream_ranges
+                        .entry(*stream_id)
+                        .or_default()
+                        .push((frame_offset, frame_offset + length, event_idx));
+                }
+
+                frame_offset = frame_end;
+            }
+        }
+
+        *offset = end;
+        path_data.total_bytes = end;
     }
 }
 
