@@ -758,35 +758,35 @@ pub fn render_raw_info(ui: &mut egui::Ui, raw: &RawInfo) {
     }
 }
 
-pub fn render_header(ui: &mut egui::Ui, event: &EventData) {
+pub fn render_header(ui: &mut egui::Ui, event: &EventData, id_prefix: &str, idx: usize) {
     match event {
         EventData::PacketSent(ref data) => {
-            render_inner_header(ui, &data.header);
+            render_inner_header(ui, &data.header, id_prefix, idx);
         }
         EventData::PacketReceived(ref data) => {
-            render_inner_header(ui, &data.header);
+            render_inner_header(ui, &data.header, id_prefix, idx);
         }
         EventData::PacketDropped(ref data) => {
             if let Some(ref header) = data.header {
-                render_inner_header(ui, header);
+                render_inner_header(ui, header, id_prefix, idx);
             }
         }
         EventData::PacketBuffered(ref data) => {
             if let Some(ref header) = data.header {
-                render_inner_header(ui, header);
+                render_inner_header(ui, header, id_prefix, idx);
             }
         }
         EventData::PacketLost(ref data) => {
             if let Some(ref header) = data.header {
-                render_inner_header(ui, header);
+                render_inner_header(ui, header, id_prefix, idx);
             }
         }
         _ => {}
     }
 }
 
-pub fn render_inner_header(ui: &mut egui::Ui, header: &PacketHeader) {
-    egui::Grid::new("packet_header_grid")
+pub fn render_inner_header(ui: &mut egui::Ui, header: &PacketHeader, id_prefix: &str, idx: usize) {
+    egui::Grid::new(format!("{}-packet_header-{}", id_prefix, idx))
         .num_columns(2)
         .spacing([20.0, 4.0])
         .show(ui, |ui| {
@@ -1066,11 +1066,13 @@ pub fn render_recovery_parameters(
 pub fn render_recovery_metrics_updated(
     ui: &mut egui::Ui,
     params: &qlog::events::quic::RecoveryMetricsUpdated,
+    id_prefix: &str,
+    idx: usize,
 ) {
     render_section_header(ui, "Recovery Metrics");
     ui.add_space(4.0);
 
-    egui::Grid::new("recovery_metrics_grid")
+    egui::Grid::new(format!("{}-recovery_metrics-{}", id_prefix, idx))
         .num_columns(2)
         .spacing([20.0, 4.0])
         .striped(true)
@@ -1133,11 +1135,16 @@ pub fn render_recovery_metrics_updated(
         });
 }
 
-pub fn render_timer_updated(ui: &mut egui::Ui, timer: &qlog::events::quic::TimerUpdated) {
+pub fn render_timer_updated(
+    ui: &mut egui::Ui,
+    timer: &qlog::events::quic::TimerUpdated,
+    id_prefix: &str,
+    idx: usize,
+) {
     render_section_header(ui, "Timer Updated");
     ui.add_space(4.0);
 
-    egui::Grid::new("timer_updated_grid")
+    egui::Grid::new(format!("{}-timer_updated-{}", id_prefix, idx))
         .num_columns(2)
         .spacing([20.0, 4.0])
         .striped(true)
@@ -1174,11 +1181,16 @@ pub fn render_timer_updated(ui: &mut egui::Ui, timer: &qlog::events::quic::Timer
         });
 }
 
-pub fn render_ecn_state_updated(ui: &mut egui::Ui, ecn: &qlog::events::quic::EcnStateUpdated) {
+pub fn render_ecn_state_updated(
+    ui: &mut egui::Ui,
+    ecn: &qlog::events::quic::EcnStateUpdated,
+    id_prefix: &str,
+    idx: usize,
+) {
     render_section_header(ui, "ECN State Updated");
     ui.add_space(4.0);
 
-    egui::Grid::new("ecn_state_grid")
+    egui::Grid::new(format!("{}-ecn_state-{}", id_prefix, idx))
         .num_columns(2)
         .spacing([20.0, 4.0])
         .striped(true)
@@ -1219,7 +1231,7 @@ pub fn render_tuple_assigned(
     render_section_header(ui, "Tuple Assigned");
     ui.add_space(4.0);
 
-    egui::Grid::new("tuple_assigned_grid")
+    egui::Grid::new(format!("{}-tuple_assigned-{}", id_prefix, idx))
         .num_columns(2)
         .spacing([20.0, 4.0])
         .show(ui, |ui| {

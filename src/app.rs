@@ -834,7 +834,7 @@ impl QlogViewerApp {
         id_prefix: &str,
     ) {
         ui.heading(format!("Event #{} - {}", idx, data.get_event_name(event)));
-        render_header(ui, &event.data);
+        render_header(ui, &event.data, id_prefix, idx);
 
         ui.separator();
 
@@ -868,19 +868,19 @@ impl QlogViewerApp {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
-                render_recovery_metrics_updated(ui, params);
+                render_recovery_metrics_updated(ui, params, id_prefix, idx);
             }
             EventData::TimerUpdated(ref timer) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
-                render_timer_updated(ui, timer);
+                render_timer_updated(ui, timer, id_prefix, idx);
             }
             EventData::EcnStateUpdated(ref ecn) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
-                render_ecn_state_updated(ui, ecn);
+                render_ecn_state_updated(ui, ecn, id_prefix, idx);
             }
             EventData::ConnectionStarted(ref started) => {
                 ui.add_space(5.);
