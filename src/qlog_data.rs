@@ -124,24 +124,29 @@ impl QlogData {
             header.qlog_version, header.qlog_format
         );
 
-        let events: Vec<Event> = records
+        // Parse events in parallel, keeping original index for ordering
+        let mut indexed_events: Vec<(usize, Event)> = records
             .collect::<Vec<&str>>()
             .par_iter()
             .enumerate()
             .filter_map(|(idx, record)| {
                 let record = record.trim_start_matches('\n');
-                // Normalize event namespace for compatibility
                 let normalized = Self::normalize_event_namespace(record);
                 match serde_json::from_str::<Event>(&normalized) {
-                    Ok(event) => Some(event),
+                    Ok(event) => Some((idx, event)),
                     Err(e) => {
-                        // logging from multiple threads is fine, but messages may interleave
                         warn!("Failed to parse event {}: {}", idx, e);
                         None
                     }
                 }
             })
             .collect();
+
+        // Sort by original index to restore chronological order
+        // (parallel collect does not preserve ordering)
+        indexed_events.sort_by_key(|(idx, _)| *idx);
+
+        let events: Vec<Event> = indexed_events.into_iter().map(|(_, e)| e).collect();
         info!("Parsed {} events", events.len());
         Ok(Self { events })
     }
