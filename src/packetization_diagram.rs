@@ -100,18 +100,25 @@ impl PacketizationDiagram {
         // Calculate max total bytes across all visible diagrams for sync scroll
         let max_total_bytes = if self.split_by_path {
             // In split mode, max is the largest individual path
-            let mut max = 0u64;
-            if self.show_sent {
-                for data in self.sent_data.values() {
-                    max = max.max(data.total_bytes);
-                }
-            }
-            if self.show_received {
-                for data in self.received_data.values() {
-                    max = max.max(data.total_bytes);
-                }
-            }
-            max
+            let sent_max = if self.show_sent {
+                self.sent_data
+                    .values()
+                    .map(|d| d.total_bytes)
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let recv_max = if self.show_received {
+                self.received_data
+                    .values()
+                    .map(|d| d.total_bytes)
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            sent_max.max(recv_max)
         } else {
             // In aggregated mode, max is the larger of the two aggregated totals
             let sent_total = if self.show_sent {

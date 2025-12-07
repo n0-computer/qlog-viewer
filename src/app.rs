@@ -466,8 +466,7 @@ impl QlogViewerApp {
             .id_salt(format!("{}-raw-json-{}", id_prefix, idx))
             .default_open(false)
             .show(ui, |ui| {
-                let json = serde_json::to_string_pretty(&event)
-                    .unwrap_or_else(|_| "Failed to serialize".into());
+                let json = serde_json::to_string_pretty(&event).expect("event serialization");
                 egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(&mut json.as_str())

@@ -80,9 +80,7 @@ impl ConnectionStats {
                             data.frames
                                 .as_ref()
                                 .map(|frames| {
-                                    frames.iter().fold(0u64, |acc, frame| {
-                                        acc + Self::estimate_frame_size(frame)
-                                    }) + 20
+                                    frames.iter().map(Self::estimate_frame_size).sum::<u64>() + 20
                                 })
                                 .unwrap_or(DEFAULT_PACKET_SIZE)
                         });
@@ -111,9 +109,7 @@ impl ConnectionStats {
                             data.frames
                                 .as_ref()
                                 .map(|frames| {
-                                    frames.iter().fold(0u64, |acc, frame| {
-                                        acc + Self::estimate_frame_size(frame)
-                                    }) + 20
+                                    frames.iter().map(Self::estimate_frame_size).sum::<u64>() + 20
                                 })
                                 .unwrap_or(DEFAULT_PACKET_SIZE)
                         });
