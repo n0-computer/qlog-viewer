@@ -309,7 +309,7 @@ impl Default for SequenceDiagram {
             event_color_map: HashMap::new(),
             tuple_map_left: HashMap::new(),
             tuple_map_right: HashMap::new(),
-            show_packet_labels: true, // Default: visible
+            show_packet_labels: true,
         }
     }
 }
@@ -843,6 +843,15 @@ impl SequenceDiagram {
             Self::compute_compressed_height(time_range, gaps, pixels_per_ms)
         };
 
+        // Capture keyboard input BEFORE ScrollArea consumes it
+        let (nav_up, nav_down, nav_esc) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_viewport(ui, |ui, viewport| {
@@ -1029,6 +1038,9 @@ impl SequenceDiagram {
                     selected_event_idx,
                     recv_selected_event_idx,
                     selected_file_idx,
+                    nav_up,
+                    nav_down,
+                    nav_esc,
                 );
 
                 self.draw_selection_indicator(&painter, &layout, viewport, self.arrows.len());
@@ -1592,14 +1604,18 @@ impl SequenceDiagram {
         arrow_rects
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_dual_selection(
         &mut self,
-        ui: &egui::Ui,
+        _ui: &egui::Ui,
         response: &Response,
         arrow_rects: &[ArrowInteractionData],
         selected_event_idx: &mut Option<usize>,
         recv_selected_event_idx: &mut Option<usize>,
         selected_file_idx: &mut usize,
+        up: bool,
+        down: bool,
+        esc: bool,
     ) {
         let total_arrows = self.arrows.len();
 
@@ -1633,7 +1649,14 @@ impl SequenceDiagram {
                     self.selected_packet_idx = Some(data.arrow_idx);
                     *selected_event_idx = Some(data.sent_event_idx);
                     *recv_selected_event_idx = data.recv_event_idx;
-                    *selected_file_idx = if data.from_left { 0 } else { 1 };
+                    // Map from_left to correct file index based on files_swapped state
+                    // When files_swapped=false: file_left=loaded_files[1], file_right=loaded_files[0]
+                    // When files_swapped=true: file_left=loaded_files[0], file_right=loaded_files[1]
+                    *selected_file_idx = if data.from_left != self.files_swapped {
+                        1
+                    } else {
+                        0
+                    };
                 } else {
                     // Click on empty space clears selection
                     self.selected_packet_idx = None;
@@ -1647,14 +1670,6 @@ impl SequenceDiagram {
             return;
         }
 
-        let (up, down, esc) = ui.input(|i| {
-            (
-                i.key_pressed(egui::Key::ArrowUp),
-                i.key_pressed(egui::Key::ArrowDown),
-                i.key_pressed(egui::Key::Escape),
-            )
-        });
-
         if esc {
             self.selected_packet_idx = None;
             *selected_event_idx = None;
@@ -1663,25 +1678,53 @@ impl SequenceDiagram {
         }
 
         if up || down {
-            let current_idx = self.selected_packet_idx.unwrap_or(0);
-            let new_idx = if up {
-                current_idx.saturating_sub(1)
+            // Sort arrows by visual Y position (minimum Y = topmost point) for correct navigation
+            let mut sorted_arrows: Vec<_> = arrow_rects.iter().collect();
+            sorted_arrows.sort_by(|a, b| {
+                let a_min_y = a.line_start_y.min(a.line_end_y);
+                let b_min_y = b.line_start_y.min(b.line_end_y);
+                a_min_y
+                    .partial_cmp(&b_min_y)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Find current position in sorted order
+            let current_pos = if let Some(current_idx) = self.selected_packet_idx {
+                sorted_arrows
+                    .iter()
+                    .position(|d| d.arrow_idx == current_idx)
             } else {
-                (current_idx + 1).min(total_arrows.saturating_sub(1))
+                None
             };
 
-            if new_idx != current_idx || self.selected_packet_idx.is_none() {
-                self.selected_packet_idx = Some(new_idx);
-                // Try to get event info from visible rects first
-                if let Some(data) = arrow_rects.iter().find(|d| d.arrow_idx == new_idx) {
+            // Calculate new position in sorted order
+            let new_pos = if let Some(pos) = current_pos {
+                if up {
+                    pos.saturating_sub(1)
+                } else {
+                    (pos + 1).min(sorted_arrows.len().saturating_sub(1))
+                }
+            } else {
+                // No selection, start from top (up) or first (down)
+                if up {
+                    sorted_arrows.len().saturating_sub(1)
+                } else {
+                    0
+                }
+            };
+
+            // Get the arrow at the new position
+            if let Some(data) = sorted_arrows.get(new_pos) {
+                let changed = self.selected_packet_idx != Some(data.arrow_idx);
+                if changed || self.selected_packet_idx.is_none() {
+                    self.selected_packet_idx = Some(data.arrow_idx);
                     *selected_event_idx = Some(data.sent_event_idx);
                     *recv_selected_event_idx = data.recv_event_idx;
-                    *selected_file_idx = if data.from_left { 0 } else { 1 };
-                } else if let Some(arrow) = self.arrows.get(new_idx) {
-                    // Arrow not visible, get info directly from arrows list
-                    *selected_event_idx = Some(arrow.sent_event_idx);
-                    *recv_selected_event_idx = arrow.recv_event_idx;
-                    *selected_file_idx = if arrow.from_left { 0 } else { 1 };
+                    *selected_file_idx = if data.from_left != self.files_swapped {
+                        1
+                    } else {
+                        0
+                    };
                 }
             }
         }

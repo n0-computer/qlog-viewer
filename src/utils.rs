@@ -1,5 +1,5 @@
 use egui::Color32;
-use qlog::events::quic::QuicFrame;
+use qlog::events::quic::{AckedRanges, QuicFrame};
 
 /// QUIC frame types for display and coloring.
 #[derive(Debug, Clone, PartialEq)]
@@ -362,5 +362,38 @@ pub fn short_packet_type(pkt_type: &str) -> String {
         "ZeroRtt" => "0R".to_string(),
         "OneRtt" => "1R".to_string(),
         s => s.chars().take(2).collect(),
+    }
+}
+
+/// Format RTT value in milliseconds with 2 decimal places.
+pub fn format_rtt(ms: f32) -> String {
+    format!("{:.2} ms", ms)
+}
+
+/// Format acked ranges as a comma-separated list of ranges.
+pub fn format_acked_ranges(ranges: &AckedRanges) -> String {
+    match ranges {
+        AckedRanges::Single(v) => v
+            .iter()
+            .map(|r| {
+                if r.len() == 1 {
+                    format!("{}", r[0])
+                } else {
+                    format!("{}-{}", r[0], r[r.len() - 1])
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        AckedRanges::Double(v) => v
+            .iter()
+            .map(|(a, b)| {
+                if a == b {
+                    format!("{}", a)
+                } else {
+                    format!("{}-{}", a, b)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }

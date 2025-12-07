@@ -11,7 +11,7 @@ use egui::{
     CentralPanel, CollapsingHeader, Context, FontFamily, FontId, RichText, SidePanel, TextFormat,
     TopBottomPanel,
 };
-use qlog::events::quic::PacketHeader;
+use qlog::events::quic::{PacketHeader, PacketType};
 use qlog::events::RawInfo;
 use qlog::events::{quic::QuicFrame, Event, EventData};
 use std::collections::BTreeSet;
@@ -41,6 +41,20 @@ enum ViewMode {
 struct EventListFilterOptions<'a> {
     available_stream_ids: &'a [u64],
     available_packet_types: &'a [String],
+    available_path_ids: &'a [u64],
+}
+
+struct EventListFilters {
+    text: String,
+    stream_id: Option<u64>,
+    packet_type: Option<String>,
+    path_id: Option<u64>,
+    show_packets: bool,
+    show_metrics: bool,
+    show_timers: bool,
+    show_connection: bool,
+    show_recovery: bool,
+    show_streams: bool,
 }
 
 pub struct QlogViewerApp {
@@ -53,6 +67,14 @@ pub struct QlogViewerApp {
     filter_text: String,
     filter_stream_id: Option<u64>,
     filter_packet_type: Option<String>,
+    filter_path_id: Option<u64>,
+    filter_show_packets: bool,
+    filter_show_metrics: bool,
+    filter_show_timers: bool,
+    filter_show_connection: bool,
+    filter_show_recovery: bool,
+    filter_show_streams: bool,
+    available_path_ids: Vec<u64>,
     show_event_detail: bool,
     view_mode: ViewMode,
     sequence_diagram: SequenceDiagram,
@@ -74,6 +96,14 @@ impl QlogViewerApp {
             filter_text: String::new(),
             filter_stream_id: None,
             filter_packet_type: None,
+            filter_path_id: None,
+            filter_show_packets: true,
+            filter_show_metrics: true,
+            filter_show_timers: true,
+            filter_show_connection: true,
+            filter_show_recovery: true,
+            filter_show_streams: true,
+            available_path_ids: Vec::new(),
             show_event_detail: true,
             view_mode: ViewMode::EventList,
             sequence_diagram: SequenceDiagram::default(),
@@ -273,27 +303,42 @@ impl QlogViewerApp {
 
             match self.view_mode {
                 ViewMode::EventList => {
-                    let mut filter_text = self.filter_text.clone();
-                    let mut filter_stream_id = self.filter_stream_id;
-                    let mut filter_packet_type = self.filter_packet_type.clone();
+                    let mut filters = EventListFilters {
+                        text: self.filter_text.clone(),
+                        stream_id: self.filter_stream_id,
+                        packet_type: self.filter_packet_type.clone(),
+                        path_id: self.filter_path_id,
+                        show_packets: self.filter_show_packets,
+                        show_metrics: self.filter_show_metrics,
+                        show_timers: self.filter_show_timers,
+                        show_connection: self.filter_show_connection,
+                        show_recovery: self.filter_show_recovery,
+                        show_streams: self.filter_show_streams,
+                    };
                     let mut selected = self.selected_event_idx;
 
                     Self::render_event_list_static(
                         ui,
                         data,
-                        &mut filter_text,
-                        &mut filter_stream_id,
-                        &mut filter_packet_type,
+                        &mut filters,
                         &mut selected,
                         EventListFilterOptions {
                             available_stream_ids: &stream_ids,
                             available_packet_types: &packet_types,
+                            available_path_ids: &self.available_path_ids,
                         },
                     );
 
-                    self.filter_text = filter_text;
-                    self.filter_stream_id = filter_stream_id;
-                    self.filter_packet_type = filter_packet_type;
+                    self.filter_text = filters.text;
+                    self.filter_stream_id = filters.stream_id;
+                    self.filter_packet_type = filters.packet_type;
+                    self.filter_path_id = filters.path_id;
+                    self.filter_show_packets = filters.show_packets;
+                    self.filter_show_metrics = filters.show_metrics;
+                    self.filter_show_timers = filters.show_timers;
+                    self.filter_show_connection = filters.show_connection;
+                    self.filter_show_recovery = filters.show_recovery;
+                    self.filter_show_streams = filters.show_streams;
                     self.selected_event_idx = selected;
                 }
                 ViewMode::SequenceDiagram => {
@@ -335,84 +380,113 @@ impl QlogViewerApp {
     fn render_event_list_static(
         ui: &mut egui::Ui,
         data: &QlogData,
-        filter_text: &mut String,
-        filter_stream_id: &mut Option<u64>,
-        filter_packet_type: &mut Option<String>,
+        filters: &mut EventListFilters,
         selected_event_idx: &mut Option<usize>,
         options: EventListFilterOptions<'_>,
     ) {
+        // First row: text filter, packet type, stream ID, path ID
         ui.horizontal(|ui| {
-            ui.label("🔍 Event:");
-            ui.add(egui::TextEdit::singleline(filter_text).desired_width(120.0));
+            ui.label("🔍");
+            ui.add(egui::TextEdit::singleline(&mut filters.text).desired_width(100.0));
 
             ui.separator();
 
-            ui.label("Packet Type:");
-            let current_type_label = filter_packet_type
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("All");
+            ui.label("Type:");
+            let current_type_label = filters.packet_type.as_deref().unwrap_or("All");
             egui::ComboBox::from_id_salt("event_list_packet_type_filter")
                 .selected_text(current_type_label)
                 .show_ui(ui, |ui| {
                     if ui
-                        .selectable_label(filter_packet_type.is_none(), "All")
+                        .selectable_label(filters.packet_type.is_none(), "All")
                         .clicked()
                     {
-                        *filter_packet_type = None;
+                        filters.packet_type = None;
                     }
                     for ptype in options.available_packet_types {
-                        let selected = filter_packet_type.as_ref() == Some(ptype);
+                        let selected = filters.packet_type.as_ref() == Some(ptype);
                         if ui.selectable_label(selected, ptype).clicked() {
-                            *filter_packet_type = Some(ptype.clone());
+                            filters.packet_type = Some(ptype.clone());
                         }
                     }
                 });
 
-            ui.separator();
-
-            ui.label("Stream ID:");
-            let current_stream_label = filter_stream_id
+            ui.label("Stream:");
+            let current_stream_label = filters
+                .stream_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "All".to_string());
             egui::ComboBox::from_id_salt("event_list_stream_id_filter")
                 .selected_text(&current_stream_label)
                 .show_ui(ui, |ui| {
                     if ui
-                        .selectable_label(filter_stream_id.is_none(), "All")
+                        .selectable_label(filters.stream_id.is_none(), "All")
                         .clicked()
                     {
-                        *filter_stream_id = None;
+                        filters.stream_id = None;
                     }
                     for &stream_id in options.available_stream_ids {
-                        let selected = *filter_stream_id == Some(stream_id);
+                        let selected = filters.stream_id == Some(stream_id);
                         if ui
                             .selectable_label(selected, stream_id.to_string())
                             .clicked()
                         {
-                            *filter_stream_id = Some(stream_id);
+                            filters.stream_id = Some(stream_id);
                         }
                     }
                 });
 
-            ui.separator();
-
-            if ui.button("Clear Filters").clicked() {
-                filter_text.clear();
-                *filter_stream_id = None;
-                *filter_packet_type = None;
+            if !options.available_path_ids.is_empty() {
+                ui.label("Path:");
+                let current_path_label = filters
+                    .path_id
+                    .map(|id| format!("{}", id))
+                    .unwrap_or_else(|| "All".to_string());
+                egui::ComboBox::from_id_salt("event_list_path_id_filter")
+                    .selected_text(&current_path_label)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(filters.path_id.is_none(), "All")
+                            .clicked()
+                        {
+                            filters.path_id = None;
+                        }
+                        for &path_id in options.available_path_ids {
+                            let selected = filters.path_id == Some(path_id);
+                            if ui.selectable_label(selected, path_id.to_string()).clicked() {
+                                filters.path_id = Some(path_id);
+                            }
+                        }
+                    });
             }
+
+            if ui.button("Clear").clicked() {
+                filters.text.clear();
+                filters.stream_id = None;
+                filters.packet_type = None;
+                filters.path_id = None;
+            }
+        });
+
+        // Second row: category toggles
+        ui.horizontal(|ui| {
+            ui.toggle_value(&mut filters.show_packets, "Packets");
+            ui.toggle_value(&mut filters.show_metrics, "Metrics");
+            ui.toggle_value(&mut filters.show_timers, "Timers");
+            ui.toggle_value(&mut filters.show_connection, "Connection");
+            ui.toggle_value(&mut filters.show_recovery, "Recovery");
+            ui.toggle_value(&mut filters.show_streams, "Streams");
         });
 
         ui.separator();
 
-        let filter_text_lower = filter_text.to_lowercase();
+        let filter_text_lower = filters.text.to_lowercase();
 
         let filtered_events: Vec<(usize, &Event)> = data
             .events
             .iter()
             .enumerate()
             .filter(|(_, event)| {
+                // Text filter
                 if !filter_text_lower.is_empty() {
                     let event_name = data.get_event_name(event);
                     if !event_name.to_lowercase().contains(&filter_text_lower) {
@@ -420,16 +494,41 @@ impl QlogViewerApp {
                     }
                 }
 
-                if let Some(stream_id) = filter_stream_id {
+                // Category filter
+                let category = Self::get_event_category(event);
+                let category_ok = match category {
+                    "packet" => filters.show_packets,
+                    "metrics" => filters.show_metrics,
+                    "timer" => filters.show_timers,
+                    "connection" => filters.show_connection,
+                    "recovery" => filters.show_recovery,
+                    "stream" => filters.show_streams,
+                    _ => true,
+                };
+                if !category_ok {
+                    return false;
+                }
+
+                // Stream ID filter
+                if let Some(stream_id) = filters.stream_id {
                     let event_stream = Self::get_event_stream_id(event);
-                    if event_stream != Some(*stream_id) {
+                    if event_stream != Some(stream_id) {
                         return false;
                     }
                 }
 
-                if let Some(ref pkt_type) = filter_packet_type {
+                // Packet type filter
+                if let Some(ref pkt_type) = filters.packet_type {
                     let event_pkt_type = Self::get_event_packet_type(event);
                     if event_pkt_type.as_ref() != Some(pkt_type) {
+                        return false;
+                    }
+                }
+
+                // Path ID filter
+                if let Some(path_id) = filters.path_id {
+                    let event_path = Self::get_event_path_id(event);
+                    if event_path != Some(path_id) {
                         return false;
                     }
                 }
@@ -451,7 +550,6 @@ impl QlogViewerApp {
 
         if up_pressed || down_pressed {
             if let Some(current_idx) = current_selection {
-                // Find the position of the current selection in filtered events
                 if let Some(current_pos) = filtered_events
                     .iter()
                     .position(|(idx, _)| *idx == current_idx)
@@ -462,67 +560,209 @@ impl QlogViewerApp {
                         new_selection = Some(filtered_events[current_pos + 1].0);
                     }
                 }
-            } else if !filtered_events.is_empty() {
-                // No selection yet, select first item on down arrow
-                if down_pressed {
-                    new_selection = Some(filtered_events[0].0);
-                }
+            } else if !filtered_events.is_empty() && down_pressed {
+                new_selection = Some(filtered_events[0].0);
             }
         }
 
+        // Sticky header with same column widths as content
+        let row_height = 22.0;
+        let font_size = 13.0;
+        let col_widths = [50.0, 80.0, 60.0, 220.0]; // #, Time, Delta, Event, then Summary
+
+        let (header_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), row_height),
+            egui::Sense::hover(),
+        );
+        let header_color = egui::Color32::GRAY;
+        let mut x = header_rect.min.x + 4.0;
+        let y = header_rect.center().y;
+
+        ui.painter().text(
+            egui::pos2(x, y),
+            egui::Align2::LEFT_CENTER,
+            "#",
+            egui::FontId::monospace(font_size),
+            header_color,
+        );
+        x += col_widths[0];
+        ui.painter().text(
+            egui::pos2(x, y),
+            egui::Align2::LEFT_CENTER,
+            "Time",
+            egui::FontId::proportional(font_size),
+            header_color,
+        );
+        x += col_widths[1];
+        ui.painter().text(
+            egui::pos2(x, y),
+            egui::Align2::LEFT_CENTER,
+            "Δ",
+            egui::FontId::proportional(font_size),
+            header_color,
+        );
+        x += col_widths[2];
+        ui.painter().text(
+            egui::pos2(x, y),
+            egui::Align2::LEFT_CENTER,
+            "Event",
+            egui::FontId::proportional(font_size),
+            header_color,
+        );
+        x += col_widths[3];
+        ui.painter().text(
+            egui::pos2(x, y),
+            egui::Align2::LEFT_CENTER,
+            "Summary",
+            egui::FontId::proportional(font_size),
+            header_color,
+        );
+
+        // Status line showing filtered count
+        let shown = filtered_events.len();
+        let total = data.events.len();
+        ui.horizontal(|ui| {
+            if shown < total {
+                ui.label(
+                    RichText::new(format!(
+                        "Showing {} of {} events ({} filtered out)",
+                        shown,
+                        total,
+                        total - shown
+                    ))
+                    .weak()
+                    .size(11.0),
+                );
+            } else {
+                ui.label(
+                    RichText::new(format!("Showing all {} events", total))
+                        .weak()
+                        .size(11.0),
+                );
+            }
+        });
+
+        ui.separator();
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show_rows(ui, 20.0, filtered_events.len(), |ui, row_range| {
-                egui::Grid::new("event_grid")
-                    .striped(true)
-                    .num_columns(4)
-                    .show(ui, |ui| {
-                        for row_idx in row_range {
-                            if let Some((actual_idx, event)) = filtered_events.get(row_idx) {
-                                let is_selected = current_selection == Some(*actual_idx);
+            .show_rows(ui, row_height, filtered_events.len(), |ui, row_range| {
+                let mut prev_time: Option<f32> = if row_range.start > 0 {
+                    filtered_events
+                        .get(row_range.start - 1)
+                        .map(|(_, e)| e.time)
+                } else {
+                    None
+                };
 
-                                // Make entire row clickable by using horizontal layout with selectable_label
-                                ui.horizontal(|ui| {
-                                    let response =
-                                        ui.selectable_label(is_selected, format!("{}", row_idx));
-                                    if response.clicked() {
-                                        new_selection = Some(*actual_idx);
-                                    }
-                                });
+                for row_idx in row_range.clone() {
+                    if let Some((event_idx, event)) = filtered_events.get(row_idx) {
+                        let is_selected = current_selection == Some(*event_idx);
 
-                                // Make each cell clickable
-                                let time_response =
-                                    ui.selectable_label(is_selected, data.format_time(event));
-                                if time_response.clicked() {
-                                    new_selection = Some(*actual_idx);
-                                }
+                        let category_color = Self::get_event_row_color(event);
 
-                                let name_response =
-                                    ui.selectable_label(is_selected, data.get_event_name(event));
-                                if name_response.clicked() {
-                                    new_selection = Some(*actual_idx);
-                                }
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), row_height),
+                            egui::Sense::click(),
+                        );
 
-                                let summary_response =
-                                    ui.selectable_label(is_selected, data.get_event_summary(event));
-                                if summary_response.clicked() {
-                                    new_selection = Some(*actual_idx);
-                                }
+                        // Draw category color background
+                        ui.painter().rect_filled(rect, 0.0, category_color);
 
-                                ui.end_row();
-                            }
+                        // Hover/selection highlight
+                        if is_selected {
+                            ui.painter().rect_filled(
+                                rect,
+                                0.0,
+                                egui::Color32::from_rgba_unmultiplied(100, 150, 255, 60),
+                            );
+                        } else if response.hovered() {
+                            ui.painter().rect_filled(
+                                rect,
+                                0.0,
+                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 20),
+                            );
                         }
-                    });
+
+                        if response.clicked() {
+                            new_selection = Some(*event_idx);
+                        }
+
+                        // Delta time
+                        let delta_str = if let Some(prev) = prev_time {
+                            let delta = event.time - prev;
+                            if delta < 0.001 {
+                                "+0".into()
+                            } else {
+                                format!("+{:.2}", delta)
+                            }
+                        } else {
+                            "-".into()
+                        };
+                        prev_time = Some(event.time);
+
+                        // Draw text content
+                        let mut x = rect.min.x + 4.0;
+                        let y = rect.center().y;
+                        let text_color = if is_selected {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::LIGHT_GRAY
+                        };
+
+                        // Column 1: Index
+                        ui.painter().text(
+                            egui::pos2(x, y),
+                            egui::Align2::LEFT_CENTER,
+                            format!("{}", event_idx),
+                            egui::FontId::monospace(font_size),
+                            text_color,
+                        );
+                        x += col_widths[0];
+
+                        // Column 2: Time
+                        ui.painter().text(
+                            egui::pos2(x, y),
+                            egui::Align2::LEFT_CENTER,
+                            data.format_time(event),
+                            egui::FontId::proportional(font_size),
+                            text_color,
+                        );
+                        x += col_widths[1];
+
+                        // Column 3: Delta
+                        ui.painter().text(
+                            egui::pos2(x, y),
+                            egui::Align2::LEFT_CENTER,
+                            &delta_str,
+                            egui::FontId::proportional(font_size),
+                            egui::Color32::GRAY,
+                        );
+                        x += col_widths[2];
+
+                        // Column 4: Event name
+                        ui.painter().text(
+                            egui::pos2(x, y),
+                            egui::Align2::LEFT_CENTER,
+                            data.get_event_name(event),
+                            egui::FontId::proportional(font_size),
+                            text_color,
+                        );
+                        x += col_widths[3];
+
+                        // Column 5: Summary
+                        ui.painter().text(
+                            egui::pos2(x, y),
+                            egui::Align2::LEFT_CENTER,
+                            data.get_event_summary(event),
+                            egui::FontId::proportional(font_size),
+                            text_color,
+                        );
+                    }
+                }
             });
 
         *selected_event_idx = new_selection;
-
-        ui.separator();
-        ui.label(format!(
-            "Showing {} of {} events",
-            filtered_events.len(),
-            data.events.len()
-        ));
     }
 
     fn get_event_packet_type(event: &Event) -> Option<String> {
@@ -544,6 +784,8 @@ impl QlogViewerApp {
             return;
         }
 
+        let mut clicked_related: Option<usize> = None;
+
         SidePanel::right("event_detail")
             .resizable(true)
             .default_width(400.0)
@@ -555,11 +797,14 @@ impl QlogViewerApp {
                     } else {
                         // Single file mode - show only one event
                         let mut event_data = None;
+                        let mut related_events = Vec::new();
                         if let Some(file) = self.selected_file() {
                             let data = &file.qlog_data;
                             if let Some(idx) = self.selected_event_idx {
                                 if let Some(event) = data.events.get(idx) {
                                     event_data = Some((idx, event, data));
+                                    related_events =
+                                        file.packet_correlation.get_related_events(idx);
                                 }
                             }
                         }
@@ -570,9 +815,42 @@ impl QlogViewerApp {
                         };
 
                         self.render_single_event(ui, idx, event, data, "single");
+
+                        // Show related events
+                        if !related_events.is_empty() {
+                            ui.add_space(10.);
+                            render_section_header(ui, "Related Events");
+                            ui.add_space(4.0);
+
+                            for (rel_idx, label) in &related_events {
+                                if let Some(rel_event) = data.events.get(*rel_idx) {
+                                    let rel_name = data.get_event_name(rel_event);
+                                    let time_delta = rel_event.time - event.time;
+                                    let delta_str = if time_delta >= 0.0 {
+                                        format!("+{:.2}ms", time_delta)
+                                    } else {
+                                        format!("{:.2}ms", time_delta)
+                                    };
+                                    ui.horizontal(|ui| {
+                                        if ui.link(format!("#{}", rel_idx)).clicked() {
+                                            clicked_related = Some(*rel_idx);
+                                        }
+                                        ui.label(format!(
+                                            "{} - {} ({})",
+                                            label, rel_name, delta_str
+                                        ));
+                                    });
+                                }
+                            }
+                        }
                     }
                 });
             });
+
+        // Handle clicks on related events (outside the closure)
+        if let Some(new_idx) = clicked_related {
+            self.selected_event_idx = Some(new_idx);
+        }
     }
 
     fn render_single_event(
@@ -647,11 +925,37 @@ impl QlogViewerApp {
             _ => {}
         }
 
+        // Raw JSON toggle
+        ui.add_space(5.);
+        CollapsingHeader::new("Raw JSON")
+            .id_salt(format!("{}-raw-json-{}", id_prefix, idx))
+            .default_open(false)
+            .show(ui, |ui| {
+                let json = serde_json::to_string_pretty(&event)
+                    .unwrap_or_else(|_| "Failed to serialize".into());
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut json.as_str())
+                            .code_editor()
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+            });
+
         if event.data.contains_quic_frames().is_some() {
+            let frame_count = match &event.data {
+                EventData::PacketSent(pkt) => pkt.frames.as_ref().map(|f| f.len()).unwrap_or(0),
+                EventData::PacketReceived(pkt) => pkt.frames.as_ref().map(|f| f.len()).unwrap_or(0),
+                EventData::PacketLost(pkt) => pkt.frames.as_ref().map(|f| f.len()).unwrap_or(0),
+                EventData::MarkedForRetransmit(ev) => ev.frames.len(),
+                EventData::FramesProcessed(ev) => ev.frames.len(),
+                _ => 0,
+            };
             ui.add_space(5.);
             ui.separator();
             ui.add_space(5.);
-            ui.heading("Frames");
+            render_section_header(ui, &format!("Frames ({})", frame_count));
+            ui.add_space(4.0);
             match event.data {
                 EventData::PacketSent(ref pkt) => {
                     if let Some(ref frames) = pkt.frames {
@@ -687,13 +991,6 @@ impl QlogViewerApp {
                 _ => {}
             }
         }
-
-        CollapsingHeader::new("Raw JSON")
-            .id_salt(format!("{}-raw-json-{}", id_prefix, idx))
-            .show(ui, |ui| {
-                let s = serde_json::to_string_pretty(&event).unwrap();
-                ui.label(s);
-            });
     }
 
     fn render_dual_event_detail(&self, ui: &mut egui::Ui) {
@@ -761,6 +1058,48 @@ impl QlogViewerApp {
         }
     }
 
+    fn get_event_path_id(event: &Event) -> Option<u64> {
+        match &event.data {
+            EventData::PacketSent(d) => d.header.path_id,
+            EventData::PacketReceived(d) => d.header.path_id,
+            EventData::PacketLost(d) => d.header.as_ref().and_then(|h| h.path_id),
+            _ => None,
+        }
+    }
+
+    fn get_event_category(event: &Event) -> &'static str {
+        match &event.data {
+            EventData::PacketSent(_)
+            | EventData::PacketReceived(_)
+            | EventData::PacketLost(_)
+            | EventData::PacketsAcked(_) => "packet",
+            EventData::MetricsUpdated(_) | EventData::CongestionStateUpdated(_) => "metrics",
+            EventData::TimerUpdated(_) => "timer",
+            EventData::ConnectionStarted(_)
+            | EventData::ConnectionStateUpdated(_)
+            | EventData::ConnectionClosed(_)
+            | EventData::TupleAssigned(_) => "connection",
+            EventData::RecoveryParametersSet(_)
+            | EventData::ParametersRestored(_)
+            | EventData::ParametersSet(_)
+            | EventData::EcnStateUpdated(_) => "recovery",
+            EventData::StreamStateUpdated(_) | EventData::FramesProcessed(_) => "stream",
+            _ => "other",
+        }
+    }
+
+    fn get_event_row_color(event: &Event) -> egui::Color32 {
+        match Self::get_event_category(event) {
+            "packet" => egui::Color32::from_rgba_unmultiplied(52, 152, 219, 20),
+            "metrics" => egui::Color32::from_rgba_unmultiplied(142, 68, 173, 20),
+            "timer" => egui::Color32::from_rgba_unmultiplied(158, 158, 158, 15),
+            "connection" => egui::Color32::from_rgba_unmultiplied(0, 150, 136, 20),
+            "recovery" => egui::Color32::from_rgba_unmultiplied(255, 152, 0, 20),
+            "stream" => egui::Color32::from_rgba_unmultiplied(231, 76, 60, 20),
+            _ => egui::Color32::TRANSPARENT,
+        }
+    }
+
     fn load_file(&mut self, path: PathBuf) {
         info!("Loading file: {:?}", path);
         self.loading = true;
@@ -769,7 +1108,7 @@ impl QlogViewerApp {
         match QlogData::from_file(&path) {
             Ok(data) => {
                 info!("Successfully loaded {} events", data.events.len());
-                let (stream_ids, packet_types) = Self::extract_filter_options(&data);
+                let (stream_ids, packet_types, path_ids) = Self::extract_filter_options(&data);
                 let correlation = PacketCorrelation::from_qlog(&data);
                 info!(
                     "Computed correlation: {} sent packets, {} lost, {} reorderings, {} time gaps, {} congestion states",
@@ -798,11 +1137,13 @@ impl QlogViewerApp {
                 self.stats_view
                     .update_stats(&loaded_file.qlog_data, &loaded_file.packet_correlation);
 
+                self.available_path_ids = path_ids;
                 self.loaded_files.push(loaded_file);
                 self.selected_file_idx = self.loaded_files.len() - 1;
                 self.loading = false;
                 self.filter_stream_id = None;
                 self.filter_packet_type = None;
+                self.filter_path_id = None;
                 self.filter_text.clear();
                 self.selected_event_idx = None;
                 self.sequence_diagram.invalidate_cache();
@@ -816,15 +1157,19 @@ impl QlogViewerApp {
         }
     }
 
-    fn extract_filter_options(data: &QlogData) -> (Vec<u64>, Vec<String>) {
+    fn extract_filter_options(data: &QlogData) -> (Vec<u64>, Vec<String>, Vec<u64>) {
         let mut stream_ids: BTreeSet<u64> = BTreeSet::new();
         let mut packet_types: BTreeSet<String> = BTreeSet::new();
+        let mut path_ids: BTreeSet<u64> = BTreeSet::new();
 
         for event in &data.events {
             match &event.data {
                 EventData::PacketSent(d) => {
                     let pkt_type = utils::full_packet_type(&format!("{:?}", d.header.packet_type));
                     packet_types.insert(pkt_type);
+                    if let Some(path_id) = d.header.path_id {
+                        path_ids.insert(path_id);
+                    }
 
                     if let Some(ref frames) = d.frames {
                         for frame in frames.iter() {
@@ -837,12 +1182,22 @@ impl QlogViewerApp {
                 EventData::PacketReceived(d) => {
                     let pkt_type = utils::full_packet_type(&format!("{:?}", d.header.packet_type));
                     packet_types.insert(pkt_type);
+                    if let Some(path_id) = d.header.path_id {
+                        path_ids.insert(path_id);
+                    }
 
                     if let Some(ref frames) = d.frames {
                         for frame in frames.iter() {
                             if let Some(sid) = utils::get_frame_stream_id(frame) {
                                 stream_ids.insert(sid);
                             }
+                        }
+                    }
+                }
+                EventData::PacketLost(d) => {
+                    if let Some(ref header) = d.header {
+                        if let Some(path_id) = header.path_id {
+                            path_ids.insert(path_id);
                         }
                     }
                 }
@@ -863,6 +1218,7 @@ impl QlogViewerApp {
         (
             stream_ids.into_iter().collect(),
             packet_types.into_iter().collect(),
+            path_ids.into_iter().collect(),
         )
     }
 }
@@ -962,7 +1318,7 @@ fn render_frame_with_prefix(
                     }
                     if let Some(acked_ranges) = acked_ranges {
                         ui.label("Acked Ranges");
-                        ui.label(format!("{acked_ranges:?}"));
+                        ui.label(utils::format_acked_ranges(acked_ranges));
                         ui.end_row();
                     }
                     if let Some(ect0) = ect0 {
@@ -1604,6 +1960,30 @@ fn render_frame_with_prefix(
     ui.add_space(5.);
 }
 
+fn render_section_header(ui: &mut egui::Ui, title: &str) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 2.0, egui::Color32::from_gray(45));
+    ui.painter().text(
+        rect.left_center() + egui::vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(13.0),
+        egui::Color32::WHITE,
+    );
+}
+
+fn render_badge(ui: &mut egui::Ui, text: &str, bg_color: egui::Color32) {
+    egui::Frame::new()
+        .fill(bg_color)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).color(egui::Color32::WHITE).size(11.0));
+        });
+}
+
 fn render_raw_info(ui: &mut egui::Ui, raw: &RawInfo) {
     if let Some(length) = raw.length {
         ui.label("Raw Info: Length");
@@ -1650,13 +2030,39 @@ fn render_header(ui: &mut egui::Ui, event: &EventData) {
 }
 
 fn render_inner_header(ui: &mut egui::Ui, header: &PacketHeader) {
-    ui.label(format!("Packet Space: {:?}", header.packet_type));
-    if let Some(pn) = header.packet_number {
-        ui.label(format!("Packet Number: {pn}"));
-    }
-    if let Some(pid) = header.path_id {
-        ui.label(format!("Path Id: {pid}"));
-    }
+    egui::Grid::new("packet_header_grid")
+        .num_columns(2)
+        .spacing([20.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Packet Space");
+            let space_color = match header.packet_type {
+                PacketType::Initial => egui::Color32::from_rgb(52, 152, 219),
+                PacketType::Handshake => egui::Color32::from_rgb(155, 89, 182),
+                PacketType::ZeroRtt => egui::Color32::from_rgb(230, 126, 34),
+                PacketType::OneRtt => egui::Color32::from_rgb(46, 204, 113),
+                _ => egui::Color32::GRAY,
+            };
+            render_badge(ui, &format!("{:?}", header.packet_type), space_color);
+            ui.end_row();
+
+            if let Some(pn) = header.packet_number {
+                ui.label("Packet Number");
+                ui.label(format!("{}", pn));
+                ui.end_row();
+            }
+            if let Some(pid) = header.path_id {
+                ui.label("Path");
+                let path_colors = [
+                    egui::Color32::from_rgb(46, 204, 113),
+                    egui::Color32::from_rgb(241, 196, 15),
+                    egui::Color32::from_rgb(231, 76, 60),
+                    egui::Color32::from_rgb(52, 152, 219),
+                ];
+                let color = path_colors[pid as usize % path_colors.len()];
+                render_badge(ui, &format!("Path {}", pid), color);
+                ui.end_row();
+            }
+        });
 }
 
 fn render_transport_parameters(
@@ -1910,72 +2316,131 @@ fn render_recovery_metrics_updated(
     ui: &mut egui::Ui,
     params: &qlog::events::quic::RecoveryMetricsUpdated,
 ) {
-    ui.heading("Recovery Metrics Updated");
+    render_section_header(ui, "Recovery Metrics");
+    ui.add_space(4.0);
 
-    if let Some(v) = params.path_id {
-        ui.label(format!("Path Id: {}", v));
-    }
-
-    if let Some(v) = params.min_rtt {
-        ui.label(format!("Min Rtt: {}", v));
-    }
-    if let Some(v) = params.smoothed_rtt {
-        ui.label(format!("Smoothed Rtt: {}", v));
-    }
-    if let Some(v) = params.latest_rtt {
-        ui.label(format!("Latest Rtt: {}", v));
-    }
-    if let Some(v) = params.rtt_variance {
-        ui.label(format!("Rtt Variance: {}", v));
-    }
-    if let Some(v) = params.pto_count {
-        ui.label(format!("PTO Count: {}", v));
-    }
-    if let Some(v) = params.congestion_window {
-        ui.label(format!("Congestion Window: {}", v));
-    }
-    if let Some(v) = params.bytes_in_flight {
-        ui.label(format!("Bytes in Flight: {}", v));
-    }
-    if let Some(v) = params.ssthresh {
-        ui.label(format!("Ssthresh: {}", v));
-    }
-    if let Some(v) = params.packets_in_flight {
-        ui.label(format!("Packets in Flight: {}", v));
-    }
-    if let Some(v) = params.pacing_rate {
-        ui.label(format!("Pacing Rate: {}", v));
-    }
+    egui::Grid::new("recovery_metrics_grid")
+        .num_columns(2)
+        .spacing([20.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            if let Some(v) = params.path_id {
+                ui.label("Path");
+                ui.label(format!("{}", v));
+                ui.end_row();
+            }
+            if let Some(v) = params.min_rtt {
+                ui.label("Min RTT");
+                ui.label(utils::format_rtt(v));
+                ui.end_row();
+            }
+            if let Some(v) = params.smoothed_rtt {
+                ui.label("Smoothed RTT");
+                ui.label(utils::format_rtt(v));
+                ui.end_row();
+            }
+            if let Some(v) = params.latest_rtt {
+                ui.label("Latest RTT");
+                ui.label(utils::format_rtt(v));
+                ui.end_row();
+            }
+            if let Some(v) = params.rtt_variance {
+                ui.label("RTT Variance");
+                ui.label(utils::format_rtt(v));
+                ui.end_row();
+            }
+            if let Some(v) = params.congestion_window {
+                ui.label("Cwnd");
+                ui.label(utils::format_bytes(v));
+                ui.end_row();
+            }
+            if let Some(v) = params.bytes_in_flight {
+                ui.label("Bytes in Flight");
+                ui.label(utils::format_bytes(v));
+                ui.end_row();
+            }
+            if let Some(v) = params.ssthresh {
+                ui.label("Ssthresh");
+                ui.label(utils::format_bytes(v));
+                ui.end_row();
+            }
+            if let Some(v) = params.packets_in_flight {
+                ui.label("Packets in Flight");
+                ui.label(format!("{}", v));
+                ui.end_row();
+            }
+            if let Some(v) = params.pacing_rate {
+                ui.label("Pacing Rate");
+                ui.label(format!("{}", v));
+                ui.end_row();
+            }
+            if let Some(v) = params.pto_count {
+                ui.label("PTO Count");
+                ui.label(format!("{}", v));
+                ui.end_row();
+            }
+        });
 }
 
 fn render_timer_updated(ui: &mut egui::Ui, timer: &qlog::events::quic::TimerUpdated) {
-    ui.heading("Timer Updated");
+    render_section_header(ui, "Timer Updated");
+    ui.add_space(4.0);
 
-    ui.label(format!("Event Type: {:?}", timer.event_type));
-    if let Some(ref timer_type) = timer.timer_type {
-        ui.label(format!("Timer Type: {:?}", timer_type));
-    }
-    if let Some(path_id) = timer.path_id {
-        ui.label(format!("Path ID: {}", path_id));
-    }
-    if let Some(timer_id) = timer.timer_id {
-        ui.label(format!("Timer ID: {}", timer_id));
-    }
-    if let Some(ref pns) = timer.packet_number_space {
-        ui.label(format!("Packet Number Space: {:?}", pns));
-    }
-    if let Some(delta) = timer.delta {
-        ui.label(format!("Delta: {:.2}ms", delta));
-    }
+    egui::Grid::new("timer_updated_grid")
+        .num_columns(2)
+        .spacing([20.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Event Type");
+            ui.label(format!("{:?}", timer.event_type));
+            ui.end_row();
+
+            if let Some(ref timer_type) = timer.timer_type {
+                ui.label("Timer Type");
+                ui.label(format!("{:?}", timer_type));
+                ui.end_row();
+            }
+            if let Some(path_id) = timer.path_id {
+                ui.label("Path ID");
+                ui.label(format!("{}", path_id));
+                ui.end_row();
+            }
+            if let Some(timer_id) = timer.timer_id {
+                ui.label("Timer ID");
+                ui.label(format!("{}", timer_id));
+                ui.end_row();
+            }
+            if let Some(ref pns) = timer.packet_number_space {
+                ui.label("Packet Number Space");
+                ui.label(format!("{:?}", pns));
+                ui.end_row();
+            }
+            if let Some(delta) = timer.delta {
+                ui.label("Delta");
+                ui.label(utils::format_rtt(delta));
+                ui.end_row();
+            }
+        });
 }
 
 fn render_ecn_state_updated(ui: &mut egui::Ui, ecn: &qlog::events::quic::EcnStateUpdated) {
-    ui.heading("ECN State Updated");
+    render_section_header(ui, "ECN State Updated");
+    ui.add_space(4.0);
 
-    if let Some(ref old) = ecn.old {
-        ui.label(format!("Old State: {:?}", old));
-    }
-    ui.label(format!("New State: {:?}", ecn.new));
+    egui::Grid::new("ecn_state_grid")
+        .num_columns(2)
+        .spacing([20.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            if let Some(ref old) = ecn.old {
+                ui.label("Old State");
+                ui.label(format!("{:?}", old));
+                ui.end_row();
+            }
+            ui.label("New State");
+            ui.label(format!("{:?}", ecn.new));
+            ui.end_row();
+        });
 }
 
 fn render_connection_started(
@@ -1984,7 +2449,8 @@ fn render_connection_started(
     id_prefix: &str,
     idx: usize,
 ) {
-    ui.heading("Connection Started");
+    render_section_header(ui, "Connection Started");
+    ui.add_space(4.0);
 
     ui.label(RichText::new("Local").strong());
     render_tuple_endpoint_info(ui, &started.local, &format!("local-{id_prefix}"), idx);
@@ -1999,15 +2465,25 @@ fn render_tuple_assigned(
     id_prefix: &str,
     idx: usize,
 ) {
-    ui.heading("Tuple Assigned");
-    ui.label(format!("Tuple ID: {}", tuple.tuple_id));
+    render_section_header(ui, "Tuple Assigned");
+    ui.add_space(4.0);
+
+    egui::Grid::new("tuple_assigned_grid")
+        .num_columns(2)
+        .spacing([20.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Tuple ID");
+            ui.label(tuple.tuple_id.to_string());
+            ui.end_row();
+        });
 
     if let Some(ref local) = tuple.tuple_local {
+        ui.add_space(4.0);
         ui.label(RichText::new("Local").strong());
         render_tuple_endpoint_info(ui, local, &format!("local-{id_prefix}"), idx);
-        ui.add_space(5.);
     }
     if let Some(ref remote) = tuple.tuple_remote {
+        ui.add_space(4.0);
         ui.label(RichText::new("Remote").strong());
         render_tuple_endpoint_info(ui, remote, &format!("remote-{id_prefix}"), idx);
     }
@@ -2019,18 +2495,32 @@ fn render_tuple_endpoint_info(
     id_prefix: &str,
     idx: usize,
 ) {
-    if let Some(ref v) = info.ip_v4 {
-        ui.label(format!("IP v4: {v}"));
-    }
-    if let Some(ref v) = info.port_v4 {
-        ui.label(format!("Port v4: {v}"));
-    }
-    if let Some(ref v) = info.ip_v6 {
-        ui.label(format!("IP v6: {v}"));
-    }
-    if let Some(v) = info.port_v6 {
-        ui.label(format!("Port v6: {v}"));
-    }
+    egui::Grid::new(format!("tuple_endpoint_grid_{}_{}", id_prefix, idx))
+        .num_columns(2)
+        .spacing([20.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            if let Some(ref v) = info.ip_v4 {
+                ui.label("IP v4");
+                ui.label(v);
+                ui.end_row();
+            }
+            if let Some(ref v) = info.port_v4 {
+                ui.label("Port v4");
+                ui.label(format!("{}", v));
+                ui.end_row();
+            }
+            if let Some(ref v) = info.ip_v6 {
+                ui.label("IP v6");
+                ui.label(v);
+                ui.end_row();
+            }
+            if let Some(v) = info.port_v6 {
+                ui.label("Port v6");
+                ui.label(format!("{}", v));
+                ui.end_row();
+            }
+        });
 
     if let Some(ref ids) = info.connection_ids {
         CollapsingHeader::new("Connection IDs")
