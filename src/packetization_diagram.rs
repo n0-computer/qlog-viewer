@@ -459,6 +459,18 @@ impl PacketizationDiagram {
 
                         painter.rect_filled(frame_rect, 1.0, color);
 
+                        // Draw label if frame is wide enough
+                        if width > 20.0 {
+                            let label = frame.frame_type.short_name();
+                            painter.text(
+                                frame_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                label,
+                                egui::FontId::proportional(9.0),
+                                Color32::BLACK,
+                            );
+                        }
+
                         // Check click for frames
                         if let Some(pos) = click_pos {
                             if frame_rect.contains(pos) && clicked_event_idx.is_none() {
