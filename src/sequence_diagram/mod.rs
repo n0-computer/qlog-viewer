@@ -17,10 +17,11 @@ use drawing::{
 use egui::{Color32, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
 use helpers::{
     build_dual_arrows, build_single_file_arrows, compute_time_bounds, count_simultaneous_sends,
-    detect_gaps, event_data_name, format_bytes, point_to_line_segment_distance,
+    detect_all_gaps, event_data_name, filter_gaps_by_scale, format_bytes, line_visible_in_viewport,
+    point_to_line_segment_distance,
 };
 use metrics_types::{
-    LastMetricsState, MetricsDisplayStyle, MetricsEvent, MetricsEventType,
+    LastMetricsState, MetricsBounds, MetricsDisplayStyle, MetricsEvent, MetricsEventType,
     MetricsVisualizationMode, PathKey, PathMetricData,
 };
 use qlog::events::EventData;
@@ -48,13 +49,26 @@ pub struct SequenceDiagram {
     cache: Option<Cache>,
     rebuild_arrows: bool,
     arrows: Vec<DualArrow>,
+
+    // Cached values rebuilt with arrows
+    cached_send_time_counts: HashMap<i64, usize>,
+    cached_path_ids: Vec<u64>,
+    cached_lane_left_paths: Vec<u64>,
+    cached_lane_right_paths: Vec<u64>,
+    cached_time_bounds: (f64, f64, f64),
+    cached_all_gaps: Vec<TimeGap>,
+    cached_filtered_gaps: Vec<TimeGap>,
+
+    last_compress_gaps: bool,
+    last_time_scale: f32,
     selected_packet_idx: Option<usize>,
     show_loss_markers: bool,
     dual_time_scale: f32,
     files_swapped: bool,
     compress_gaps: bool,
     pub visualization_mode: VisualizationMode,
-    // Metrics events visualization
+
+    // Metrics visualization
     metrics_events: Vec<MetricsEvent>,
     pub show_metrics_events: bool,
     pub show_all_metrics: bool,
@@ -62,12 +76,17 @@ pub struct SequenceDiagram {
     pub overlay_graphs: bool,
     selected_metrics_event: Option<usize>,
     last_metrics: Option<LastMetricsState>,
-    // Dynamic color assignment for event types
+
+    // Cached metrics graph data (rebuilt with metrics_events)
+    cached_path_metrics: HashMap<PathKey, PathMetricData>,
+    cached_left_paths: Vec<u64>,
+    cached_right_paths: Vec<u64>,
+    cached_left_bounds: MetricsBounds,
+    cached_right_bounds: MetricsBounds,
+
     event_color_map: HashMap<String, Color32>,
-    // Tuple info maps (tuple_id -> TupleInfo) for each file
     tuple_map_left: HashMap<String, TupleInfo>,
     tuple_map_right: HashMap<String, TupleInfo>,
-    // Toggle for packet labels visibility
     pub show_packet_labels: bool,
 }
 
@@ -76,6 +95,15 @@ impl Default for SequenceDiagram {
         Self {
             cache: None,
             arrows: Vec::new(),
+            cached_send_time_counts: HashMap::new(),
+            cached_path_ids: Vec::new(),
+            cached_lane_left_paths: Vec::new(),
+            cached_lane_right_paths: Vec::new(),
+            cached_time_bounds: (0.0, 0.0, 1.0),
+            cached_all_gaps: Vec::new(),
+            cached_filtered_gaps: Vec::new(),
+            last_compress_gaps: true,
+            last_time_scale: -1.0, // Invalid to force initial rebuild
             rebuild_arrows: true,
             selected_packet_idx: None,
             show_loss_markers: true,
@@ -90,6 +118,11 @@ impl Default for SequenceDiagram {
             overlay_graphs: true,      // Default: overlaid
             selected_metrics_event: None,
             last_metrics: None,
+            cached_path_metrics: HashMap::new(),
+            cached_left_paths: Vec::new(),
+            cached_right_paths: Vec::new(),
+            cached_left_bounds: MetricsBounds::default(),
+            cached_right_bounds: MetricsBounds::default(),
             event_color_map: HashMap::new(),
             tuple_map_left: HashMap::new(),
             tuple_map_right: HashMap::new(),
@@ -125,6 +158,54 @@ impl CachingVisualization for SequenceDiagram {
 }
 
 impl SequenceDiagram {
+    fn rebuild_cached_values(&mut self) {
+        self.cached_time_bounds = compute_time_bounds(&self.arrows);
+        self.cached_send_time_counts = count_simultaneous_sends(&self.arrows);
+
+        let mut path_ids: Vec<u64> = Vec::new();
+        let mut left_lanes = BTreeSet::new();
+        let mut right_lanes = BTreeSet::new();
+        for a in &self.arrows {
+            if let Some(pid) = a.packet.path_id {
+                path_ids.push(pid);
+                if a.from_left {
+                    left_lanes.insert(pid);
+                } else {
+                    right_lanes.insert(pid);
+                }
+            }
+        }
+        path_ids.sort_unstable();
+        path_ids.dedup();
+        self.cached_path_ids = path_ids;
+        self.cached_lane_left_paths = left_lanes.into_iter().collect();
+        self.cached_lane_right_paths = right_lanes.into_iter().collect();
+
+        self.cached_all_gaps = detect_all_gaps(&self.arrows, self.cached_time_bounds.0);
+        self.last_time_scale = -1.0;
+        self.rebuild_filtered_gaps_if_needed();
+    }
+
+    fn rebuild_gaps_if_needed(&mut self) {
+        self.rebuild_filtered_gaps_if_needed();
+    }
+
+    fn rebuild_filtered_gaps_if_needed(&mut self) {
+        let scale_changed = (self.last_time_scale - self.dual_time_scale).abs() > 0.01;
+        let compress_changed = self.last_compress_gaps != self.compress_gaps;
+
+        if scale_changed || compress_changed {
+            self.last_compress_gaps = self.compress_gaps;
+            self.last_time_scale = self.dual_time_scale;
+
+            self.cached_filtered_gaps = if self.compress_gaps {
+                filter_gaps_by_scale(&self.cached_all_gaps, self.dual_time_scale)
+            } else {
+                Vec::new()
+            };
+        }
+    }
+
     /// Get or assign a color for an event type name
     fn get_event_color(&mut self, event_name: &str) -> Color32 {
         if let Some(&color) = self.event_color_map.get(event_name) {
@@ -157,18 +238,18 @@ impl SequenceDiagram {
                 &cache.left.packets,
                 &(0..cache.left.packets.len()).collect::<Vec<_>>(),
             );
+            self.rebuild_cached_values();
+            self.extract_metrics_events(data, false, 0);
         }
         if self.arrows.is_empty() {
             ui.label("No packet events found");
             return;
         }
 
-        let (min_time, _max_time, time_range) = compute_time_bounds(&self.arrows);
-        let gaps = if self.compress_gaps {
-            detect_gaps(&self.arrows, min_time, self.dual_time_scale)
-        } else {
-            Vec::new()
-        };
+        // Check if gaps need rebuilding (settings changed)
+        self.rebuild_gaps_if_needed();
+
+        let (min_time, _max_time, time_range) = self.cached_time_bounds;
 
         self.render_header(ui);
         self.render_controls(ui, time_range);
@@ -180,7 +261,7 @@ impl SequenceDiagram {
             ui,
             min_time,
             time_range,
-            &gaps,
+            &self.cached_filtered_gaps.clone(),
             selected_event_idx,
             &mut recv_selected_event_idx,
             &mut selected_file_idx,
@@ -212,6 +293,7 @@ impl SequenceDiagram {
         if self.rebuild_arrows {
             self.rebuild_arrows = false;
             self.arrows = build_dual_arrows(cache_left, cache_right);
+            self.rebuild_cached_values();
             self.metrics_events.clear();
             self.extract_metrics_events(&file_left.qlog_data, false, 0);
             self.extract_metrics_events(&file_right.qlog_data, true, 1);
@@ -222,12 +304,10 @@ impl SequenceDiagram {
             return;
         }
 
-        let (min_time, _max_time, time_range) = compute_time_bounds(&self.arrows);
-        let gaps = if self.compress_gaps {
-            detect_gaps(&self.arrows, min_time, self.dual_time_scale)
-        } else {
-            Vec::new()
-        };
+        // Check if gaps need rebuilding (settings changed)
+        self.rebuild_gaps_if_needed();
+
+        let (min_time, _max_time, time_range) = self.cached_time_bounds;
 
         self.render_header(ui);
         self.render_controls(ui, time_range);
@@ -235,7 +315,7 @@ impl SequenceDiagram {
             ui,
             min_time,
             time_range,
-            &gaps,
+            &self.cached_filtered_gaps.clone(),
             selected_event_idx,
             recv_selected_event_idx,
             selected_file_idx,
@@ -445,25 +525,14 @@ impl SequenceDiagram {
                 let (left_margin, right_margin) = if self.show_metrics_events
                     && self.metrics_visualization_mode == MetricsVisualizationMode::Graphs
                 {
-                    // Count paths for each side to determine space needed
+                    // Use cached path counts instead of iterating all metrics_events
                     let (left_path_count, right_path_count) = if self.overlay_graphs {
-                        // In overlay mode, we just need 2 strips per side if there are any paths
-                        let has_left = self.metrics_events.iter().any(|e| e.file_idx == 0);
-                        let has_right = self.metrics_events.iter().any(|e| e.file_idx == 1);
+                        // In overlay mode, just need 2 strips per side if there are any paths
+                        let has_left = !self.cached_left_paths.is_empty();
+                        let has_right = !self.cached_right_paths.is_empty();
                         (if has_left { 1 } else { 0 }, if has_right { 1 } else { 0 })
                     } else {
-                        // In split mode, count unique paths per side
-                        use std::collections::BTreeSet;
-                        let mut left_paths = BTreeSet::new();
-                        let mut right_paths = BTreeSet::new();
-                        for event in &self.metrics_events {
-                            if event.file_idx == 0 {
-                                left_paths.insert(event.path_id);
-                            } else {
-                                right_paths.insert(event.path_id);
-                            }
-                        }
-                        (left_paths.len(), right_paths.len())
+                        (self.cached_left_paths.len(), self.cached_right_paths.len())
                     };
 
                     const STRIP_WIDTH: f32 = 40.0;
@@ -523,23 +592,13 @@ impl SequenceDiagram {
                     }
                 };
 
-                // Calculate lane layout if in lane mode
+                // Calculate lane layout if in lane mode (use cached path IDs)
                 let lane_layout = if self.visualization_mode == VisualizationMode::VerticalLanes {
-                    // Collect unique path IDs from arrows by direction
-                    let mut left_path_ids = BTreeSet::new();
-                    let mut right_path_ids = BTreeSet::new();
-                    for arrow in self.arrows.iter() {
-                        if let Some(pid) = arrow.packet.path_id {
-                            if arrow.from_left {
-                                left_path_ids.insert(pid);
-                            } else {
-                                right_path_ids.insert(pid);
-                            }
-                        }
-                    }
-                    let left_vec: Vec<u64> = left_path_ids.into_iter().collect();
-                    let right_vec: Vec<u64> = right_path_ids.into_iter().collect();
-                    Some(self.calculate_lane_layout(&layout, &left_vec, &right_vec))
+                    Some(self.calculate_lane_layout(
+                        &layout,
+                        &self.cached_lane_left_paths,
+                        &self.cached_lane_right_paths,
+                    ))
                 } else {
                     None
                 };
@@ -589,23 +648,17 @@ impl SequenceDiagram {
                     gaps,
                     pixels_per_ms,
                 };
-                draw_time_markers(
-                    &painter,
-                    &layout,
-                    &viewport,
-                    total_content_height,
-                    &time_ctx,
-                );
+                draw_time_markers(&painter, &layout, &viewport, &time_ctx);
 
                 if !gaps.is_empty() {
                     draw_gap_indicators(&painter, &layout, gaps, &time_to_y);
                 }
 
-                let send_time_counts = count_simultaneous_sends(&self.arrows);
+                // Use cached send_time_counts instead of computing every frame
                 let arrow_rects = self.draw_dual_arrows(
                     &painter,
                     &layout,
-                    &send_time_counts,
+                    &self.cached_send_time_counts,
                     &time_to_y,
                     lane_layout.as_ref(),
                     &viewport,
@@ -625,16 +678,8 @@ impl SequenceDiagram {
 
                 self.draw_selection_indicator(&painter, &layout, viewport, self.arrows.len());
 
-                // Collect unique path_ids for legend
-                let mut path_ids: Vec<u64> = self
-                    .arrows
-                    .iter()
-                    .filter_map(|a| a.packet.path_id)
-                    .collect();
-                path_ids.sort_unstable();
-                path_ids.dedup();
-
-                draw_path_legend(&painter, layout.rect, viewport, &path_ids);
+                // Use cached path_ids instead of computing every frame
+                draw_path_legend(&painter, layout.rect, viewport, &self.cached_path_ids);
 
                 // Draw metrics events (boxes and markers)
                 self.draw_metrics_events(&painter, ui, &layout, time_to_y, &viewport);
@@ -659,13 +704,35 @@ impl SequenceDiagram {
         let visible_min_y = layout.rect.top() + viewport.top() - margin;
         let visible_max_y = layout.rect.top() + viewport.bottom() + margin;
 
+        // Use binary search to find starting index (arrows are sorted by send_time)
+        // We need extra buffer since recv_time can be before send_time visually
+        let buffer_margin = 200.0;
+        let search_min_y = visible_min_y - buffer_margin;
+        let first_idx = arrows
+            .binary_search_by(|a| {
+                let y = time_to_y(a.send_time);
+                if y < search_min_y {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            })
+            .unwrap_or_else(|i| i);
+
         // Store selected arrow data for deferred rendering (to draw on top)
         let has_selection = self.selected_packet_idx.is_some();
         let mut selected_arrow_data: Option<SelectedArrowRenderData> = None;
 
-        for (arrow_idx, arrow) in arrows.iter().enumerate() {
+        for (i, arrow) in arrows[first_idx..].iter().enumerate() {
+            let arrow_idx = first_idx + i;
             let y_send = time_to_y(arrow.send_time);
             let y_recv = time_to_y(arrow.recv_time);
+
+            // Early exit: if send_time is past visible range, we're done
+            // (arrows are sorted by send_time)
+            if y_send > visible_max_y + buffer_margin {
+                break;
+            }
 
             // Skip arrows completely outside the visible viewport
             let arrow_min_y = y_send.min(y_recv);
@@ -1692,6 +1759,86 @@ impl SequenceDiagram {
             num_boxes,
             num_markers
         );
+
+        // Rebuild cached path metrics data
+        self.rebuild_path_metrics_cache();
+    }
+
+    /// Pre-compute path metrics data for graph rendering
+    fn rebuild_path_metrics_cache(&mut self) {
+        self.cached_path_metrics.clear();
+        self.cached_left_paths.clear();
+        self.cached_right_paths.clear();
+
+        for event in &self.metrics_events {
+            if event.event_type == MetricsEventType::MetricsUpdated {
+                let pid = event.path_id.unwrap_or(0);
+                let key = PathKey {
+                    file_idx: event.file_idx,
+                    path_id: pid,
+                };
+                let entry = self.cached_path_metrics.entry(key).or_default();
+
+                if let Some(bif) = event.bytes_in_flight {
+                    entry.bytes_in_flight.push((event.time, bif));
+                }
+                if let Some(rtt) = event.smoothed_rtt {
+                    entry.rtt.push((event.time, rtt));
+                }
+            }
+        }
+
+        // Separate paths by file
+        for key in self.cached_path_metrics.keys() {
+            if key.file_idx == 0 {
+                if !self.cached_left_paths.contains(&key.path_id) {
+                    self.cached_left_paths.push(key.path_id);
+                }
+            } else if !self.cached_right_paths.contains(&key.path_id) {
+                self.cached_right_paths.push(key.path_id);
+            }
+        }
+
+        self.cached_left_paths.sort_unstable();
+        self.cached_right_paths.sort_unstable();
+
+        // Compute global bounds for each side
+        self.cached_left_bounds = MetricsBounds {
+            bif_min: u64::MAX,
+            bif_max: 0,
+            rtt_min: f32::MAX,
+            rtt_max: f32::MIN,
+        };
+        self.cached_right_bounds = MetricsBounds {
+            bif_min: u64::MAX,
+            bif_max: 0,
+            rtt_min: f32::MAX,
+            rtt_max: f32::MIN,
+        };
+
+        for (key, data) in &self.cached_path_metrics {
+            let bounds = if key.file_idx == 0 {
+                &mut self.cached_left_bounds
+            } else {
+                &mut self.cached_right_bounds
+            };
+
+            for (_, v) in &data.bytes_in_flight {
+                bounds.bif_min = bounds.bif_min.min(*v);
+                bounds.bif_max = bounds.bif_max.max(*v);
+            }
+            for (_, v) in &data.rtt {
+                bounds.rtt_min = bounds.rtt_min.min(*v);
+                bounds.rtt_max = bounds.rtt_max.max(*v);
+            }
+        }
+
+        tracing::debug!(
+            "Rebuilt path metrics cache: {} paths (left: {}, right: {})",
+            self.cached_path_metrics.len(),
+            self.cached_left_paths.len(),
+            self.cached_right_paths.len()
+        );
     }
 
     fn is_significant_metrics_change(
@@ -1744,16 +1891,12 @@ impl SequenceDiagram {
         viewport: &Rect,
     ) {
         if !self.show_metrics_events {
-            tracing::debug!("Metrics events hidden by toggle");
             return;
         }
 
         if self.metrics_events.is_empty() {
-            tracing::debug!("No metrics events to display");
             return;
         }
-
-        tracing::debug!("Drawing {} metrics events", self.metrics_events.len());
 
         match self.metrics_visualization_mode {
             MetricsVisualizationMode::Events => {
@@ -1962,90 +2105,61 @@ impl SequenceDiagram {
         const STRIP_WIDTH: f32 = 40.0;
         const EDGE_PADDING: f32 = 10.0;
 
+        // Use cached path metrics data
+        let path_metrics = &self.cached_path_metrics;
+        let left_paths = &self.cached_left_paths;
+        let right_paths = &self.cached_right_paths;
+        let left_bounds = &self.cached_left_bounds;
+        let right_bounds = &self.cached_right_bounds;
+
         if self.overlay_graphs {
-            // Overlay mode: group by (file_idx, path_id), then overlay paths per file
-            let mut path_metrics: HashMap<PathKey, PathMetricData> = HashMap::new();
-
-            for event in &self.metrics_events {
-                if event.event_type == MetricsEventType::MetricsUpdated {
-                    let pid = event.path_id.unwrap_or(0);
-                    let key = PathKey {
-                        file_idx: event.file_idx,
-                        path_id: pid,
-                    };
-                    let entry = path_metrics.entry(key).or_default();
-
-                    if let Some(bif) = event.bytes_in_flight {
-                        entry.bytes_in_flight.push((event.time, bif));
-                    }
-                    if let Some(rtt) = event.smoothed_rtt {
-                        entry.rtt.push((event.time, rtt));
-                    }
-                }
-            }
-
-            // Separate paths by file
-            let mut left_paths: Vec<u64> = Vec::new();
-            let mut right_paths: Vec<u64> = Vec::new();
-
-            for key in path_metrics.keys() {
-                if key.file_idx == 0 {
-                    if !left_paths.contains(&key.path_id) {
-                        left_paths.push(key.path_id);
-                    }
-                } else if !right_paths.contains(&key.path_id) {
-                    right_paths.push(key.path_id);
-                }
-            }
-
-            left_paths.sort_unstable();
-            right_paths.sort_unstable();
-
             // Draw left side overlaid graphs
             if !left_paths.is_empty() {
                 let bif_x = layout.rect.min.x + EDGE_PADDING;
                 let rtt_x = bif_x + STRIP_WIDTH + STRIP_SPACING;
 
-                // Collect all in-flight and RTT data for left file paths
-                let mut left_bif: Vec<(u64, Vec<(f64, u64)>)> = Vec::new();
-                let mut left_rtt: Vec<(u64, Vec<(f64, f32)>)> = Vec::new();
+                // Collect references to data for left file paths
+                let mut left_bif: Vec<(u64, &Vec<(f64, u64)>)> = Vec::new();
+                let mut left_rtt: Vec<(u64, &Vec<(f64, f32)>)> = Vec::new();
 
-                for &path_id in &left_paths {
+                for &path_id in left_paths {
                     let key = PathKey {
                         file_idx: 0,
                         path_id,
                     };
                     if let Some(data) = path_metrics.get(&key) {
                         if !data.bytes_in_flight.is_empty() {
-                            left_bif.push((path_id, data.bytes_in_flight.clone()));
+                            left_bif.push((path_id, &data.bytes_in_flight));
                         }
                         if !data.rtt.is_empty() {
-                            left_rtt.push((path_id, data.rtt.clone()));
+                            left_rtt.push((path_id, &data.rtt));
                         }
                     }
                 }
 
-                Self::draw_metric_strip_overlaid(
+                Self::draw_metric_strip_overlaid_ref(
                     painter,
                     "in flight",
                     &left_bif,
+                    left_bounds.bif_min,
+                    left_bounds.bif_max,
                     bif_x,
                     STRIP_WIDTH,
                     layout,
                     time_to_y,
-                    ui,
                     viewport,
                 );
 
-                Self::draw_metric_strip_f32_overlaid(
+                Self::draw_metric_strip_f32_overlaid_ref(
                     painter,
                     "RTT",
                     &left_rtt,
+                    left_bounds.rtt_min,
+                    left_bounds.rtt_max,
                     rtt_x,
                     STRIP_WIDTH,
                     layout,
                     time_to_y,
-                    ui,
                     viewport,
                 );
             }
@@ -2055,87 +2169,53 @@ impl SequenceDiagram {
                 let rtt_x = layout.rect.max.x - EDGE_PADDING - STRIP_WIDTH * 2.0 - STRIP_SPACING;
                 let bif_x = rtt_x + STRIP_WIDTH + STRIP_SPACING;
 
-                // Collect all in-flight and RTT data for right file paths
-                let mut right_bif: Vec<(u64, Vec<(f64, u64)>)> = Vec::new();
-                let mut right_rtt: Vec<(u64, Vec<(f64, f32)>)> = Vec::new();
+                // Collect references to data for right file paths
+                let mut right_bif: Vec<(u64, &Vec<(f64, u64)>)> = Vec::new();
+                let mut right_rtt: Vec<(u64, &Vec<(f64, f32)>)> = Vec::new();
 
-                for &path_id in &right_paths {
+                for &path_id in right_paths {
                     let key = PathKey {
                         file_idx: 1,
                         path_id,
                     };
                     if let Some(data) = path_metrics.get(&key) {
                         if !data.bytes_in_flight.is_empty() {
-                            right_bif.push((path_id, data.bytes_in_flight.clone()));
+                            right_bif.push((path_id, &data.bytes_in_flight));
                         }
                         if !data.rtt.is_empty() {
-                            right_rtt.push((path_id, data.rtt.clone()));
+                            right_rtt.push((path_id, &data.rtt));
                         }
                     }
                 }
 
-                Self::draw_metric_strip_overlaid(
+                Self::draw_metric_strip_overlaid_ref(
                     painter,
                     "in flight",
                     &right_bif,
+                    right_bounds.bif_min,
+                    right_bounds.bif_max,
                     bif_x,
                     STRIP_WIDTH,
                     layout,
                     time_to_y,
-                    ui,
                     viewport,
                 );
 
-                Self::draw_metric_strip_f32_overlaid(
+                Self::draw_metric_strip_f32_overlaid_ref(
                     painter,
                     "RTT",
                     &right_rtt,
+                    right_bounds.rtt_min,
+                    right_bounds.rtt_max,
                     rtt_x,
                     STRIP_WIDTH,
                     layout,
                     time_to_y,
-                    ui,
                     viewport,
                 );
             }
         } else {
-            // Split mode: group by (file_idx, path_id)
-            let mut path_metrics: HashMap<PathKey, PathMetricData> = HashMap::new();
-
-            for event in &self.metrics_events {
-                if event.event_type == MetricsEventType::MetricsUpdated {
-                    let pid = event.path_id.unwrap_or(0);
-                    let key = PathKey {
-                        file_idx: event.file_idx,
-                        path_id: pid,
-                    };
-                    let entry = path_metrics.entry(key).or_default();
-
-                    if let Some(bif) = event.bytes_in_flight {
-                        entry.bytes_in_flight.push((event.time, bif));
-                    }
-                    if let Some(rtt) = event.smoothed_rtt {
-                        entry.rtt.push((event.time, rtt));
-                    }
-                }
-            }
-
-            let mut left_paths: Vec<u64> = Vec::new();
-            let mut right_paths: Vec<u64> = Vec::new();
-
-            for key in path_metrics.keys() {
-                if key.file_idx == 0 {
-                    if !left_paths.contains(&key.path_id) {
-                        left_paths.push(key.path_id);
-                    }
-                } else if !right_paths.contains(&key.path_id) {
-                    right_paths.push(key.path_id);
-                }
-            }
-
-            left_paths.sort_unstable();
-            right_paths.sort_unstable();
-
+            // Split mode - use cached data
             let strips_per_path = 2;
 
             let mut draw_side =
@@ -2206,24 +2286,25 @@ impl SequenceDiagram {
                     }
                 };
 
-            draw_side(&left_paths, 0, layout.rect.min.x + EDGE_PADDING, true);
-            draw_side(&right_paths, 1, layout.rect.max.x - EDGE_PADDING, false);
+            draw_side(left_paths, 0, layout.rect.min.x + EDGE_PADDING, true);
+            draw_side(right_paths, 1, layout.rect.max.x - EDGE_PADDING, false);
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_metric_strip_overlaid(
+    fn draw_metric_strip_overlaid_ref(
         painter: &Painter,
         label: &str,
-        path_data: &[(u64, Vec<(f64, u64)>)],
+        path_data: &[(u64, &Vec<(f64, u64)>)],
+        min_value: u64,
+        max_value: u64,
         x: f32,
         width: f32,
         layout: &DiagramLayout,
         time_to_y: &impl Fn(f64) -> f32,
-        _ui: &mut egui::Ui,
-        _viewport: &Rect,
+        viewport: &Rect,
     ) {
-        if path_data.is_empty() {
+        if path_data.is_empty() || min_value == u64::MAX {
             return;
         }
 
@@ -2248,28 +2329,18 @@ impl SequenceDiagram {
             Color32::LIGHT_GRAY,
         );
 
-        // Find global min/max across all paths
-        let mut all_values = Vec::new();
-        for (_, points) in path_data {
-            for (_, v) in points {
-                all_values.push(*v);
-            }
-        }
-
-        if all_values.is_empty() {
-            return;
-        }
-
-        let max_value = *all_values.iter().max().unwrap();
-        let min_value = *all_values.iter().min().unwrap();
         let value_range = if max_value > min_value {
             max_value - min_value
         } else {
             1
         };
 
+        // Calculate visible y-range for culling
+        let visible_min_y = layout.rect.top() + viewport.top() - 20.0;
+        let visible_max_y = layout.rect.top() + viewport.bottom() + 20.0;
+
         // Draw each path in different color
-        for &(path_id, ref points) in path_data {
+        for &(path_id, points) in path_data {
             if points.is_empty() {
                 continue;
             }
@@ -2277,35 +2348,40 @@ impl SequenceDiagram {
             let color = path_color(path_id);
             let mut prev_point: Option<egui::Pos2> = None;
 
-            for (time, value) in points {
+            for (time, value) in points.iter() {
                 let y = time_to_y(*time);
                 let normalized = (*value - min_value) as f32 / value_range as f32;
                 let point_x = x + 5.0 + normalized * (width - 10.0);
                 let point = egui::Pos2::new(point_x, y);
+                let curr_visible = y >= visible_min_y && y <= visible_max_y;
 
                 if let Some(prev) = prev_point {
-                    painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                    if line_visible_in_viewport(prev.y, y, visible_min_y, visible_max_y) {
+                        painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                    }
                 }
-
-                painter.circle_filled(point, 2.5, color);
+                if curr_visible {
+                    painter.circle_filled(point, 2.5, color);
+                }
                 prev_point = Some(point);
             }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_metric_strip_f32_overlaid(
+    fn draw_metric_strip_f32_overlaid_ref(
         painter: &Painter,
         label: &str,
-        path_data: &[(u64, Vec<(f64, f32)>)],
+        path_data: &[(u64, &Vec<(f64, f32)>)],
+        min_value: f32,
+        max_value: f32,
         x: f32,
         width: f32,
         layout: &DiagramLayout,
         time_to_y: &impl Fn(f64) -> f32,
-        _ui: &mut egui::Ui,
-        _viewport: &Rect,
+        viewport: &Rect,
     ) {
-        if path_data.is_empty() {
+        if path_data.is_empty() || min_value == f32::MAX {
             return;
         }
 
@@ -2330,34 +2406,18 @@ impl SequenceDiagram {
             Color32::LIGHT_GRAY,
         );
 
-        // Find global min/max across all paths
-        let mut all_values = Vec::new();
-        for (_, points) in path_data {
-            for (_, v) in points {
-                all_values.push(*v);
-            }
-        }
-
-        if all_values.is_empty() {
-            return;
-        }
-
-        let max_value = *all_values
-            .iter()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap();
-        let min_value = *all_values
-            .iter()
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap();
         let value_range = if max_value > min_value {
             max_value - min_value
         } else {
             0.001
         };
 
+        // Calculate visible y-range for culling
+        let visible_min_y = layout.rect.top() + viewport.top() - 20.0;
+        let visible_max_y = layout.rect.top() + viewport.bottom() + 20.0;
+
         // Draw each path in different color
-        for &(path_id, ref points) in path_data {
+        for &(path_id, points) in path_data {
             if points.is_empty() {
                 continue;
             }
@@ -2365,17 +2425,21 @@ impl SequenceDiagram {
             let color = path_color(path_id);
             let mut prev_point: Option<egui::Pos2> = None;
 
-            for (time, value) in points {
+            for (time, value) in points.iter() {
                 let y = time_to_y(*time);
                 let normalized = (*value - min_value) / value_range;
                 let point_x = x + 5.0 + normalized * (width - 10.0);
                 let point = egui::Pos2::new(point_x, y);
+                let curr_visible = y >= visible_min_y && y <= visible_max_y;
 
                 if let Some(prev) = prev_point {
-                    painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                    if line_visible_in_viewport(prev.y, y, visible_min_y, visible_max_y) {
+                        painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                    }
                 }
-
-                painter.circle_filled(point, 2.5, color);
+                if curr_visible {
+                    painter.circle_filled(point, 2.5, color);
+                }
                 prev_point = Some(point);
             }
         }
@@ -2445,6 +2509,10 @@ impl SequenceDiagram {
             );
         }
 
+        // Calculate visible y-range for culling
+        let visible_min_y = layout.rect.top() + viewport.top() - 20.0;
+        let visible_max_y = layout.rect.top() + viewport.bottom() + 20.0;
+
         // Draw line graph and collect points for hover interaction
         let mut prev_point: Option<egui::Pos2> = None;
         let mut graph_points = Vec::new();
@@ -2454,20 +2522,21 @@ impl SequenceDiagram {
             let normalized = (*value - min_value) as f32 / value_range as f32;
             let point_x = x + 5.0 + normalized * (width - 10.0);
             let point = egui::Pos2::new(point_x, y);
+            let curr_visible = y >= visible_min_y && y <= visible_max_y;
 
-            // Draw line connecting to previous point
             if let Some(prev) = prev_point {
-                painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                if line_visible_in_viewport(prev.y, y, visible_min_y, visible_max_y) {
+                    painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                }
             }
-
-            // Draw bigger circle at data point
-            painter.circle_filled(point, 3.5, color);
-
-            graph_points.push((point, *value));
+            if curr_visible {
+                painter.circle_filled(point, 3.5, color);
+                graph_points.push((point, *value));
+            }
             prev_point = Some(point);
         }
 
-        // Add hover interaction for data points
+        // Add hover interaction for visible data points only
         for (point, value) in graph_points {
             let hover_rect = Rect::from_center_size(point, Vec2::splat(10.0));
             let response = ui.interact(
@@ -2575,6 +2644,10 @@ impl SequenceDiagram {
             );
         }
 
+        // Calculate visible y-range for culling
+        let visible_min_y = layout.rect.top() + viewport.top() - 20.0;
+        let visible_max_y = layout.rect.top() + viewport.bottom() + 20.0;
+
         // Draw line graph and collect points for hover interaction
         let mut prev_point: Option<egui::Pos2> = None;
         let mut graph_points = Vec::new();
@@ -2584,20 +2657,21 @@ impl SequenceDiagram {
             let normalized = (*value - min_value) / value_range;
             let point_x = x + 5.0 + normalized * (width - 10.0);
             let point = egui::Pos2::new(point_x, y);
+            let curr_visible = y >= visible_min_y && y <= visible_max_y;
 
-            // Draw line connecting to previous point
             if let Some(prev) = prev_point {
-                painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                if line_visible_in_viewport(prev.y, y, visible_min_y, visible_max_y) {
+                    painter.line_segment([prev, point], egui::Stroke::new(1.5, color));
+                }
             }
-
-            // Draw bigger circle at data point
-            painter.circle_filled(point, 3.5, color);
-
-            graph_points.push((point, *value));
+            if curr_visible {
+                painter.circle_filled(point, 3.5, color);
+                graph_points.push((point, *value));
+            }
             prev_point = Some(point);
         }
 
-        // Add hover interaction for data points
+        // Add hover interaction for visible data points only
         for (point, value) in graph_points {
             let hover_rect = Rect::from_center_size(point, Vec2::splat(10.0));
             let response = ui.interact(

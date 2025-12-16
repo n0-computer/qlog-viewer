@@ -114,7 +114,8 @@ pub fn compute_time_bounds(arrows: &[DualArrow]) -> (f64, f64, f64) {
     (min_time, max_time, time_range)
 }
 
-pub fn detect_gaps(arrows: &[DualArrow], min_time: f64, pixels_per_ms: f32) -> Vec<TimeGap> {
+/// Detect all potential gaps (scale-independent). Call once when arrows change.
+pub fn detect_all_gaps(arrows: &[DualArrow], min_time: f64) -> Vec<TimeGap> {
     if arrows.is_empty() {
         return Vec::new();
     }
@@ -126,27 +127,41 @@ pub fn detect_gaps(arrows: &[DualArrow], min_time: f64, pixels_per_ms: f32) -> V
     event_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     event_times.dedup();
 
-    const MIN_VISUAL_HEIGHT_PX: f32 = 100.0;
-    let min_gap_ms = (MIN_VISUAL_HEIGHT_PX / pixels_per_ms) as f64;
+    // Use sweep line algorithm: track active intervals
+    // Events: (time, +1 for start, -1 for end)
+    let mut events: Vec<(f64, i32)> = Vec::with_capacity(arrows.len() * 2);
+    for a in arrows.iter().filter(|a| !a.is_lost) {
+        events.push((a.send_time, 1)); // interval starts
+        events.push((a.recv_time, -1)); // interval ends
+    }
+    events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
+    // Find periods where no arrows are in flight
     let mut gaps = Vec::new();
-    let mut prev_time = min_time;
+    let mut active_count = 0i32;
+    let mut last_zero_time = min_time;
+    let mut was_zero = true;
 
-    for &t in &event_times {
-        let gap_size = t - prev_time;
+    for (time, delta) in events {
+        if was_zero && active_count == 0 && time > last_zero_time {
+            // We were at zero and still at zero - this is a potential gap
+        }
 
-        if gap_size > min_gap_ms {
-            let arrows_in_flight = arrows
-                .iter()
-                .any(|a| a.send_time < t && a.recv_time > prev_time && !a.is_lost);
+        active_count += delta;
 
-            if !arrows_in_flight {
+        if active_count == 0 && !was_zero {
+            // Just became zero - start of potential gap
+            last_zero_time = time;
+            was_zero = true;
+        } else if active_count > 0 && was_zero {
+            // Just became non-zero - end of potential gap
+            if time > last_zero_time {
                 let margin = 5.0_f64;
-                let gap_start = prev_time + margin;
-                let gap_end = t - margin;
+                let gap_start = last_zero_time + margin;
+                let gap_end = time - margin;
                 let compressed_amount = gap_end - gap_start;
 
-                if compressed_amount > min_gap_ms * 0.5 {
+                if compressed_amount > 0.0 {
                     gaps.push(TimeGap {
                         start_time: gap_start,
                         end_time: gap_end,
@@ -154,11 +169,23 @@ pub fn detect_gaps(arrows: &[DualArrow], min_time: f64, pixels_per_ms: f32) -> V
                     });
                 }
             }
+            was_zero = false;
         }
-        prev_time = t;
     }
 
     gaps
+}
+
+/// Filter pre-computed gaps by minimum size based on current scale
+pub fn filter_gaps_by_scale(all_gaps: &[TimeGap], pixels_per_ms: f32) -> Vec<TimeGap> {
+    const MIN_VISUAL_HEIGHT_PX: f32 = 100.0;
+    let min_gap_ms = (MIN_VISUAL_HEIGHT_PX / pixels_per_ms) as f64 * 0.5;
+
+    all_gaps
+        .iter()
+        .filter(|g| g.compressed_amount > min_gap_ms)
+        .cloned()
+        .collect()
 }
 
 pub fn count_simultaneous_sends(arrows: &[DualArrow]) -> HashMap<i64, usize> {
@@ -207,4 +234,20 @@ pub fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1}GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+/// Check if a line segment should be drawn given viewport bounds.
+/// Returns true if either endpoint is visible OR if the segment crosses the viewport.
+#[inline]
+pub fn line_visible_in_viewport(
+    prev_y: f32,
+    curr_y: f32,
+    visible_min_y: f32,
+    visible_max_y: f32,
+) -> bool {
+    let prev_visible = prev_y >= visible_min_y && prev_y <= visible_max_y;
+    let curr_visible = curr_y >= visible_min_y && curr_y <= visible_max_y;
+    let crosses = (prev_y < visible_min_y && curr_y > visible_max_y)
+        || (prev_y > visible_max_y && curr_y < visible_min_y);
+    prev_visible || curr_visible || crosses
 }

@@ -153,37 +153,51 @@ pub fn draw_time_markers(
     painter: &Painter,
     layout: &DiagramLayout,
     viewport: &Rect,
-    total_height: f32,
     time_ctx: &TimeContext,
 ) {
     let target_markers = 6;
     let step_pixels = viewport.height() / target_markers as f32;
     let marker_color = Color32::from_rgb(140, 140, 140);
-    let max_markers = (total_height / step_pixels).ceil() as usize + 1;
 
-    for i in 0..max_markers {
+    let visible_top = layout.rect.top() + viewport.top();
+    let visible_bottom = layout.rect.top() + viewport.bottom();
+
+    // Pre-compute gap visual positions for time adjustment
+    let gap_visual_starts: Vec<f32> = {
+        let mut result = Vec::with_capacity(time_ctx.gaps.len());
+        let mut cum_compression = 0.0f64;
+        let mut cum_gap_heights = 0.0f32;
+        for gap in time_ctx.gaps {
+            let start = (gap.start_time - time_ctx.min_time - cum_compression) as f32
+                * time_ctx.pixels_per_ms
+                + cum_gap_heights;
+            result.push(start);
+            cum_compression += gap.compressed_amount;
+            cum_gap_heights += COMPRESSED_GAP_HEIGHT;
+        }
+        result
+    };
+
+    // Only iterate markers in visible range
+    let first_marker_offset = (visible_top - layout.top_y - step_pixels).max(0.0);
+    let first_idx = (first_marker_offset / step_pixels).floor() as usize;
+    let last_offset = visible_bottom - layout.top_y + step_pixels;
+    let last_idx = (last_offset / step_pixels).ceil() as usize;
+
+    for i in first_idx..=last_idx {
         let visual_offset = i as f32 * step_pixels;
         let y = layout.top_y + visual_offset;
 
-        let mut time = time_ctx.min_time + (visual_offset / time_ctx.pixels_per_ms) as f64;
-
-        let mut compression_before = 0.0;
-        for gap in time_ctx.gaps {
-            let gap_visual_start = (gap.start_time - time_ctx.min_time - compression_before) as f32
-                * time_ctx.pixels_per_ms
-                + (time_ctx
-                    .gaps
-                    .iter()
-                    .take_while(|g| g.end_time <= gap.start_time)
-                    .count() as f32
-                    * COMPRESSED_GAP_HEIGHT);
-
-            if visual_offset > gap_visual_start {
-                time += gap.compressed_amount;
-            }
-            compression_before += gap.compressed_amount;
+        if y < visible_top - 20.0 || y > visible_bottom + 20.0 {
+            continue;
         }
 
+        let mut time = time_ctx.min_time + (visual_offset / time_ctx.pixels_per_ms) as f64;
+        for (idx, gap) in time_ctx.gaps.iter().enumerate() {
+            if visual_offset > gap_visual_starts[idx] {
+                time += gap.compressed_amount;
+            }
+        }
         time = time.clamp(time_ctx.min_time, time_ctx.max_time);
 
         let decimals = if time < 1.0 {
@@ -202,7 +216,6 @@ pub fn draw_time_markers(
             egui::FontId::proportional(10.0),
             marker_color,
         );
-
         painter.text(
             Pos2::new(layout.right_x + 15.0, y),
             egui::Align2::LEFT_CENTER,

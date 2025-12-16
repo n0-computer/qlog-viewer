@@ -19,6 +19,15 @@ pub struct PathMetricData {
     pub rtt: Vec<(f64, f32)>,
 }
 
+/// Cached global min/max values for metric graphs
+#[derive(Debug, Clone, Default)]
+pub struct MetricsBounds {
+    pub bif_min: u64,
+    pub bif_max: u64,
+    pub rtt_min: f32,
+    pub rtt_max: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricsDisplayStyle {
     Box,
