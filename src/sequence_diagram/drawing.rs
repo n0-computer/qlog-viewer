@@ -154,6 +154,8 @@ pub fn draw_time_markers(
     layout: &DiagramLayout,
     viewport: &Rect,
     time_ctx: &TimeContext,
+    server_time_offset_ms: f64,
+    files_swapped: bool,
 ) {
     let target_markers = 6;
     let step_pixels = viewport.height() / target_markers as f32;
@@ -200,26 +202,49 @@ pub fn draw_time_markers(
         }
         time = time.clamp(time_ctx.min_time, time_ctx.max_time);
 
-        let decimals = if time < 1.0 {
-            2
-        } else if time < 100.0 {
-            1
-        } else {
-            0
+        // Format time label helper
+        let format_time = |t: f64| -> String {
+            let decimals = if t.abs() < 1.0 {
+                2
+            } else if t.abs() < 100.0 {
+                1
+            } else {
+                0
+            };
+            format!("{:.prec$}", t, prec = decimals)
         };
-        let label = format!("{:.prec$}", time, prec = decimals);
+
+        // Client time (no offset)
+        let client_label = format_time(time);
+        // Server time (offset added - server timeline is pulled UP, so at y position
+        // showing client time T, server time is T + offset)
+        let server_time = time + server_time_offset_ms;
+        let server_label = format_time(server_time);
+
+        // Left side label (client if not swapped, server if swapped)
+        let left_label = if files_swapped {
+            &server_label
+        } else {
+            &client_label
+        };
+        // Right side label (server if not swapped, client if swapped)
+        let right_label = if files_swapped {
+            &client_label
+        } else {
+            &server_label
+        };
 
         painter.text(
             Pos2::new(layout.left_x - 15.0, y),
             egui::Align2::RIGHT_CENTER,
-            &label,
+            left_label,
             egui::FontId::proportional(10.0),
             marker_color,
         );
         painter.text(
             Pos2::new(layout.right_x + 15.0, y),
             egui::Align2::LEFT_CENTER,
-            &label,
+            right_label,
             egui::FontId::proportional(10.0),
             marker_color,
         );
