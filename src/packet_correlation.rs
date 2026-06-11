@@ -1,11 +1,11 @@
 use crate::qlog_data::QlogData;
-use qlog::events::quic::{AckedRanges, EcnState, QuicFrame};
+use qlog::events::quic::{EcnState, QuicFrame};
 use qlog::events::EventData;
 use std::collections::HashMap;
 
 const MAX_REORDERINGS: usize = 1000;
 const MAX_TIME_GAPS: usize = 1000;
-const DEFAULT_GAP_THRESHOLD_MS: f32 = 50.0;
+const DEFAULT_GAP_THRESHOLD_MS: f64 = 50.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CongestionState {
@@ -50,38 +50,38 @@ impl CongestionState {
 
 #[derive(Debug, Clone)]
 pub struct SentPacketInfo {
-    pub time: f32,
+    pub time: f64,
     pub event_idx: usize,
-    pub ack_time: Option<f32>,
+    pub ack_time: Option<f64>,
     pub ack_event_idx: Option<usize>,
     pub loss_event_idx: Option<usize>,
-    pub rtt: Option<f32>,
+    pub rtt: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ReorderEvent {
-    pub earlier_time: f32,
+    pub earlier_time: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct TimeGap {
-    pub start_time: f32,
-    pub end_time: f32,
-    pub duration: f32,
+    pub start_time: f64,
+    pub end_time: f64,
+    pub duration: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct CongestionPeriod {
     pub state: CongestionState,
-    pub start_time: f32,
-    pub end_time: f32,
+    pub start_time: f64,
+    pub end_time: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct EcnPeriod {
     pub state: EcnState,
-    pub start_time: f32,
-    pub end_time: f32,
+    pub start_time: f64,
+    pub end_time: f64,
 }
 
 impl EcnPeriod {
@@ -109,7 +109,7 @@ pub struct PacketCorrelation {
     // Key: (path_id, packet_type, packet_number)
     // packet_type is the packet space (Initial, Handshake, 1RTT, etc.)
     pub sent_packets: HashMap<(u64, String, u64), SentPacketInfo>,
-    pub lost_packets: HashMap<(u64, String, u64), f32>,
+    pub lost_packets: HashMap<(u64, String, u64), f64>,
     // Reverse mappings for event linking
     pub sent_event_to_key: HashMap<usize, (u64, String, u64)>,
     pub ack_event_to_sent_keys: HashMap<usize, Vec<(u64, String, u64)>>,
@@ -118,8 +118,8 @@ pub struct PacketCorrelation {
     pub time_gaps: Vec<TimeGap>,
     pub congestion_states: Vec<CongestionPeriod>,
     pub ecn_states: Vec<EcnPeriod>,
-    pub min_time: f32,
-    pub max_time: f32,
+    pub min_time: f64,
+    pub max_time: f64,
 }
 
 impl PacketCorrelation {
@@ -146,7 +146,7 @@ impl PacketCorrelation {
 
     fn extract_sent_packets(&mut self, qlog: &QlogData) {
         for (event_idx, event) in qlog.events.iter().enumerate() {
-            if let EventData::PacketSent(data) = &event.data {
+            if let EventData::QuicPacketSent(data) = &event.data {
                 if let Some(pn) = data.header.packet_number {
                     let path_id = data.header.path_id.unwrap_or(0);
                     let packet_type = format!("{:?}", data.header.packet_type);
@@ -170,7 +170,7 @@ impl PacketCorrelation {
 
     fn extract_losses(&mut self, qlog: &QlogData) {
         for (event_idx, event) in qlog.events.iter().enumerate() {
-            if let EventData::PacketLost(data) = &event.data {
+            if let EventData::QuicPacketLost(data) = &event.data {
                 if let Some(header) = &data.header {
                     if let Some(pn) = header.packet_number {
                         let path_id = header.path_id.unwrap_or(0);
@@ -192,7 +192,7 @@ impl PacketCorrelation {
         // First try PacketsAcked events (most accurate)
         // Note: PacketsAcked doesn't include path_id or packet_type, so we try to match against all combinations
         for (event_idx, event) in qlog.events.iter().enumerate() {
-            if let EventData::PacketsAcked(data) = &event.data {
+            if let EventData::QuicPacketsAcked(data) = &event.data {
                 if let Some(ref packet_numbers) = data.packet_numbers {
                     let mut acked_keys = Vec::new();
                     for &pn in packet_numbers {
@@ -224,7 +224,7 @@ impl PacketCorrelation {
         // Also extract ACKs from received packets' ACK frames
         // In QUIC, ACKs in a packet space acknowledge packets in the same packet space
         for (event_idx, event) in qlog.events.iter().enumerate() {
-            let EventData::PacketReceived(data) = &event.data else {
+            let EventData::QuicPacketReceived(data) = &event.data else {
                 continue;
             };
             let Some(frames) = &data.frames else { continue };
@@ -243,10 +243,10 @@ impl PacketCorrelation {
                     continue;
                 };
 
-                let pns: Vec<u64> = match ranges {
-                    AckedRanges::Single(nested) => nested.iter().flatten().copied().collect(),
-                    AckedRanges::Double(pairs) => pairs.iter().flat_map(|(s, e)| *s..=*e).collect(),
-                };
+                let pns: Vec<u64> = ranges
+                    .iter()
+                    .flat_map(|range| range.start..=range.end)
+                    .collect();
 
                 for pn in pns {
                     // ACK in this packet space acknowledges packets in the same packet space
@@ -276,7 +276,7 @@ impl PacketCorrelation {
         let mut max_received_pn_per_path_space: HashMap<(u64, String), u64> = HashMap::new();
 
         for event in qlog.events.iter() {
-            if let EventData::PacketReceived(data) = &event.data {
+            if let EventData::QuicPacketReceived(data) = &event.data {
                 if let Some(pn) = data.header.packet_number {
                     let path_id = data.header.path_id.unwrap_or(0);
                     let packet_type = format!("{:?}", data.header.packet_type);
@@ -301,7 +301,7 @@ impl PacketCorrelation {
         });
     }
 
-    pub fn detect_time_gaps(&mut self, qlog: &QlogData, threshold_ms: f32) {
+    pub fn detect_time_gaps(&mut self, qlog: &QlogData, threshold_ms: f64) {
         self.time_gaps.clear();
 
         if qlog.events.len() < 2 {
@@ -328,7 +328,7 @@ impl PacketCorrelation {
         let mut state_start_time = self.min_time;
 
         for event in qlog.events.iter() {
-            if let EventData::CongestionStateUpdated(data) = &event.data {
+            if let EventData::QuicCongestionStateUpdated(data) = &event.data {
                 if current_state != CongestionState::Unknown {
                     self.congestion_states.push(CongestionPeriod {
                         state: current_state,
@@ -356,7 +356,7 @@ impl PacketCorrelation {
         let mut state_start_time = self.min_time;
 
         for event in qlog.events.iter() {
-            if let EventData::EcnStateUpdated(data) = &event.data {
+            if let EventData::QuicEcnStateUpdated(data) = &event.data {
                 if let Some(ref state) = current_state {
                     self.ecn_states.push(EcnPeriod {
                         state: state.clone(),
@@ -383,7 +383,7 @@ impl PacketCorrelation {
         self.lost_packets.len()
     }
 
-    pub fn visible_time_gaps(&self, start_time: f32, end_time: f32) -> Vec<&TimeGap> {
+    pub fn visible_time_gaps(&self, start_time: f64, end_time: f64) -> Vec<&TimeGap> {
         self.time_gaps
             .iter()
             .filter(|g| g.end_time >= start_time && g.start_time <= end_time)

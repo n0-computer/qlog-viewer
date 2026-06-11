@@ -168,7 +168,7 @@ impl QlogData {
 
     pub fn get_event_summary(&self, event: &Event) -> String {
         match &event.data {
-            EventData::PacketSent(d) => {
+            EventData::QuicPacketSent(d) => {
                 format!(
                     "Space {:?}, PN: {}, Path: {}",
                     d.header.packet_type,
@@ -176,7 +176,7 @@ impl QlogData {
                     d.header.path_id.unwrap_or_default(),
                 )
             }
-            EventData::PacketReceived(d) => {
+            EventData::QuicPacketReceived(d) => {
                 format!(
                     "Space {:?}, PN: {}, Path: {}",
                     d.header.packet_type,
@@ -184,10 +184,10 @@ impl QlogData {
                     d.header.path_id.unwrap_or_default(),
                 )
             }
-            EventData::StreamStateUpdated(d) => {
+            EventData::QuicStreamStateUpdated(d) => {
                 format!("Stream: {}, State: {:?}", d.stream_id, d.new)
             }
-            EventData::PacketLost(d) => {
+            EventData::QuicPacketLost(d) => {
                 if let Some(header) = &d.header {
                     format!(
                         "Space {:?}, PN: {}, Path: {}",
@@ -199,7 +199,7 @@ impl QlogData {
                     "Lost packet".to_string()
                 }
             }
-            EventData::MetricsUpdated(d) => {
+            EventData::QuicMetricsUpdated(d) => {
                 let mut parts = Vec::new();
                 if let Some(cwnd) = d.congestion_window {
                     parts.push(format!("cwnd: {}", cwnd));
@@ -212,10 +212,10 @@ impl QlogData {
                 }
                 parts.join(", ")
             }
-            EventData::FramesProcessed(d) => {
+            EventData::QuicFramesProcessed(d) => {
                 format!("Frames: {}", d.frames.len())
             }
-            EventData::TimerUpdated(d) => {
+            EventData::QuicTimerUpdated(d) => {
                 let timer_name = match &d.timer_type {
                     Some(t) => {
                         let s = format!("{:?}", t);
@@ -229,9 +229,9 @@ impl QlogData {
                 let action = format!("{:?}", d.event_type);
                 format!("{} {}", timer_name, action)
             }
-            EventData::ParametersRestored(_) => "Restored params".to_string(),
-            EventData::RecoveryParametersSet(_) => "Recovery params".to_string(),
-            EventData::EcnStateUpdated(d) => {
+            EventData::QuicParametersRestored(_) => "Restored params".to_string(),
+            EventData::QuicRecoveryParametersSet(_) => "Recovery params".to_string(),
+            EventData::QuicEcnStateUpdated(d) => {
                 format!("ECN: {:?} -> {:?}", d.old, d.new)
             }
             _ => String::new(),

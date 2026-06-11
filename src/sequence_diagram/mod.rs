@@ -1424,12 +1424,12 @@ impl SequenceDiagram {
             .filter_map(|(idx, event)| {
                 let (header, direction, frames_iter): (_, _, &mut dyn Iterator<Item = _>) =
                     match &event.data {
-                        EventData::PacketSent(d) => (
+                        EventData::QuicPacketSent(d) => (
                             &d.header,
                             PacketDirection::Sent,
                             &mut d.frames.iter().flatten() as &mut dyn Iterator<Item = _>,
                         ),
-                        EventData::PacketReceived(d) => (
+                        EventData::QuicPacketReceived(d) => (
                             &d.header,
                             PacketDirection::Received,
                             &mut d.frames.iter().flatten() as &mut dyn Iterator<Item = _>,
@@ -1478,7 +1478,7 @@ impl SequenceDiagram {
 
         // First pass: extract TupleAssigned events to build tuple maps
         for event in qlog.events.iter() {
-            if let EventData::TupleAssigned(data) = &event.data {
+            if let EventData::QuicTupleAssigned(data) = &event.data {
                 let info = TupleInfo::from_tuple_assigned(
                     data.tuple_id.clone(),
                     data.tuple_remote.as_ref(),
@@ -1503,7 +1503,7 @@ impl SequenceDiagram {
             let path_id = Self::extract_path_id(event, None);
 
             let metrics_event = match &event.data {
-                EventData::ConnectionStarted(_) => {
+                EventData::QuicConnectionStarted(_) => {
                     let event_type = MetricsEventType::ConnectionStarted;
                     let color = event_type.color();
                     let display_style = event_type.display_style();
@@ -1522,7 +1522,7 @@ impl SequenceDiagram {
                     })
                 }
 
-                EventData::MetricsUpdated(data) => {
+                EventData::QuicMetricsUpdated(data) => {
                     // Only create event if there's meaningful data
                     if data.smoothed_rtt.is_some() || data.bytes_in_flight.is_some() {
                         let event_type = MetricsEventType::MetricsUpdated;
@@ -1602,7 +1602,7 @@ impl SequenceDiagram {
                     }
                 }
 
-                EventData::CongestionStateUpdated(data) => {
+                EventData::QuicCongestionStateUpdated(data) => {
                     let event_type = MetricsEventType::CongestionStateUpdated;
                     let color = event_type.color();
                     let display_style = event_type.display_style();
@@ -1624,7 +1624,7 @@ impl SequenceDiagram {
                     })
                 }
 
-                EventData::ConnectionStateUpdated(data) => {
+                EventData::QuicConnectionStateUpdated(data) => {
                     let event_type = MetricsEventType::ConnectionStateUpdated;
                     let color = event_type.color();
                     let display_style = event_type.display_style();
@@ -1643,7 +1643,7 @@ impl SequenceDiagram {
                     })
                 }
 
-                EventData::PacketLost(data) => {
+                EventData::QuicPacketLost(data) => {
                     if let Some(header) = &data.header {
                         if let Some(pn) = header.packet_number {
                             let event_type = MetricsEventType::PacketLost;
@@ -1671,9 +1671,9 @@ impl SequenceDiagram {
                 }
 
                 // Skip packet events (already rendered as arrows)
-                EventData::PacketSent(_) | EventData::PacketReceived(_) => None,
+                EventData::QuicPacketSent(_) | EventData::QuicPacketReceived(_) => None,
 
-                EventData::TimerUpdated(data) => {
+                EventData::QuicTimerUpdated(data) => {
                     use qlog::events::quic::TimerType;
 
                     let event_type = MetricsEventType::TimerUpdated;

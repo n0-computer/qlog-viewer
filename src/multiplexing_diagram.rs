@@ -80,7 +80,7 @@ impl MultiplexingDiagram {
             let time = event.time as f64;
 
             match &event.data {
-                EventData::PacketSent(data) => {
+                EventData::QuicPacketSent(data) => {
                     if let Some(ref frames) = data.frames {
                         for frame in frames.iter() {
                             if let QuicFrame::Stream { stream_id, raw, .. } = frame {
@@ -103,7 +103,7 @@ impl MultiplexingDiagram {
                         }
                     }
                 }
-                EventData::PacketReceived(data) => {
+                EventData::QuicPacketReceived(data) => {
                     if let Some(ref frames) = data.frames {
                         for frame in frames.iter() {
                             if let QuicFrame::Stream { stream_id, raw, .. } = frame {
@@ -126,7 +126,7 @@ impl MultiplexingDiagram {
                         }
                     }
                 }
-                EventData::FramesProcessed(data) => {
+                EventData::QuicFramesProcessed(data) => {
                     for frame in data.frames.iter() {
                         if let QuicFrame::Stream { stream_id, raw, .. } = frame {
                             total_segments += 1;
@@ -146,7 +146,7 @@ impl MultiplexingDiagram {
                         }
                     }
                 }
-                EventData::StreamStateUpdated(data) => {
+                EventData::QuicStreamStateUpdated(data) => {
                     stream_data.entry(data.stream_id).or_default();
                 }
                 _ => {}
