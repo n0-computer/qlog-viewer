@@ -9,13 +9,15 @@ Built with [egui](https://crates.io/crates/egui) and designed to be faster than 
 ## Installation
 
 ```
-cargo install n0qlog
+cargo install --git https://github.com/n0-computer/qlog-viewer
+n0qlog
 ```
 
-Or build from source:
+Or build from a checkout:
 
 ```
-cargo build --release
+git clone https://github.com/n0-computer/qlog-viewer
+cargo run --release
 ```
 
 ### macOS Gatekeeper
