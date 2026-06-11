@@ -21,8 +21,7 @@ egui_extras = { version = "0.33", features = ["all_loaders"] }
 egui_plot = "0.34"
 
 # qlog parsing
-# qlog = { package = "n0-qlog", version = "0.1.0" }
-qlog = { package = "n0-qlog", version = "0.1.0", git = "https://github.com/n0-computer/n0-qlog", branch = "Frando/chase-upstream" }
+qlog = { package = "n0-qlog", version = "0.2" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sonic-rs = "0.5"
