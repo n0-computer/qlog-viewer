@@ -88,6 +88,9 @@ pub struct SequenceDiagram {
     tuple_map_left: HashMap<String, TupleInfo>,
     tuple_map_right: HashMap<String, TupleInfo>,
     pub show_packet_labels: bool,
+
+    // Server time offset to visually shift server-side events down
+    server_time_offset_ms: f64,
 }
 
 impl Default for SequenceDiagram {
@@ -127,6 +130,7 @@ impl Default for SequenceDiagram {
             tuple_map_left: HashMap::new(),
             tuple_map_right: HashMap::new(),
             show_packet_labels: true,
+            server_time_offset_ms: 0.0,
         }
     }
 }
@@ -216,6 +220,29 @@ impl SequenceDiagram {
         let color = EVENT_COLOR_PALETTE[color_idx];
         self.event_color_map.insert(event_name.to_string(), color);
         color
+    }
+
+    /// Find the first reported RTT from the server (right side, file_idx=1) path 0
+    /// that is not the initial RTT of 333ms. Returns value in ms.
+    fn find_first_server_rtt(&self) -> Option<f32> {
+        // Server is on the right side (file_idx = 1 when not swapped, 0 when swapped)
+        let server_file_idx = if self.files_swapped { 0 } else { 1 };
+        let key = PathKey {
+            file_idx: server_file_idx,
+            path_id: 0,
+        };
+        if let Some(data) = self.cached_path_metrics.get(&key) {
+            // Find first RTT that is not ~333ms (initial default)
+            // RTT values are stored in seconds, so 333ms = 0.333s
+            for &(_time, rtt_secs) in &data.rtt {
+                // Skip values that are approximately 0.333s (initial RTT)
+                if (rtt_secs - 0.333).abs() > 0.001 {
+                    // Convert to ms for the offset slider
+                    return Some(rtt_secs * 1000.0);
+                }
+            }
+        }
+        None
     }
 
     pub fn show_single(
@@ -309,12 +336,18 @@ impl SequenceDiagram {
 
         let (min_time, _max_time, time_range) = self.cached_time_bounds;
 
+        // Adjust min_time to account for server offset (server timeline pulled UP)
+        // Server events at time T appear at visual position T - offset
+        // So we need to start the diagram earlier to show server events near time 0
+        let adjusted_min_time = min_time - self.server_time_offset_ms;
+        let adjusted_time_range = time_range + self.server_time_offset_ms;
+
         self.render_header(ui);
         self.render_controls(ui, time_range);
         self.render_diagram(
             ui,
-            min_time,
-            time_range,
+            adjusted_min_time,
+            adjusted_time_range,
             &self.cached_filtered_gaps.clone(),
             selected_event_idx,
             recv_selected_event_idx,
@@ -477,6 +510,34 @@ impl SequenceDiagram {
 
                 if self.metrics_visualization_mode == MetricsVisualizationMode::Graphs {
                     ui.checkbox(&mut self.overlay_graphs, "Overlay");
+                }
+            }
+        });
+
+        // Row 3: Server time offset
+        ui.horizontal(|ui| {
+            ui.label("Server offset:");
+            ui.add_sized(
+                [150.0, 18.0],
+                egui::Slider::new(&mut self.server_time_offset_ms, 0.0..=500.0)
+                    .suffix(" ms")
+                    .min_decimals(0)
+                    .max_decimals(1),
+            );
+            if ui
+                .button("RTT")
+                .on_hover_text(
+                    "Set to first reported RTT from server path 0 (excluding initial 333ms)",
+                )
+                .clicked()
+            {
+                if let Some(rtt) = self.find_first_server_rtt() {
+                    self.server_time_offset_ms = rtt as f64;
+                }
+            }
+            if self.server_time_offset_ms > 0.0 {
+                if ui.button("Reset").clicked() {
+                    self.server_time_offset_ms = 0.0;
                 }
             }
         });
@@ -648,7 +709,14 @@ impl SequenceDiagram {
                     gaps,
                     pixels_per_ms,
                 };
-                draw_time_markers(&painter, &layout, &viewport, &time_ctx);
+                draw_time_markers(
+                    &painter,
+                    &layout,
+                    &viewport,
+                    &time_ctx,
+                    self.server_time_offset_ms,
+                    self.files_swapped,
+                );
 
                 if !gaps.is_empty() {
                     draw_gap_indicators(&painter, &layout, gaps, &time_to_y);
@@ -725,8 +793,24 @@ impl SequenceDiagram {
 
         for (i, arrow) in arrows[first_idx..].iter().enumerate() {
             let arrow_idx = first_idx + i;
-            let y_send = time_to_y(arrow.send_time);
-            let y_recv = time_to_y(arrow.recv_time);
+            // Apply server time offset to server-side timestamps
+            // The offset pulls the server timeline UP (negative direction)
+            // So server time T appears at the visual position of client time (T - offset)
+            // This makes arrows from client to server go DOWNWARD
+            // Server is on right when not swapped, on left when swapped
+            let offset = self.server_time_offset_ms;
+            let server_at_recv = arrow.from_left != self.files_swapped;
+            let (y_send, y_recv) = if server_at_recv {
+                (
+                    time_to_y(arrow.send_time),
+                    time_to_y(arrow.recv_time - offset),
+                )
+            } else {
+                (
+                    time_to_y(arrow.send_time - offset),
+                    time_to_y(arrow.recv_time),
+                )
+            };
 
             // Early exit: if send_time is past visible range, we're done
             // (arrows are sorted by send_time)
@@ -1915,7 +1999,7 @@ impl SequenceDiagram {
                     .collect();
 
                 // Draw markers first (behind boxes)
-                Self::draw_metrics_markers_static(&markers, painter, ui, layout, &time_to_y);
+                self.draw_metrics_markers(&markers, painter, ui, layout, &time_to_y);
 
                 // Draw boxes on top
                 self.draw_metrics_boxes_mut(&boxes, painter, ui, layout, &time_to_y);
@@ -1939,7 +2023,14 @@ impl SequenceDiagram {
         const MARGIN_FROM_TIMELINE: f32 = 20.0;
 
         for event in events {
-            let y = time_to_y(event.time);
+            // Apply server time offset to server-side events (subtract to pull UP)
+            let server_file_idx = if self.files_swapped { 0 } else { 1 };
+            let time = if event.file_idx == server_file_idx {
+                event.time - self.server_time_offset_ms
+            } else {
+                event.time
+            };
+            let y = time_to_y(time);
 
             // Draw colored box
             let text_galley = painter.layout_no_wrap(
@@ -2032,7 +2123,8 @@ impl SequenceDiagram {
         }
     }
 
-    fn draw_metrics_markers_static(
+    fn draw_metrics_markers(
+        &self,
         events: &[MetricsEvent],
         painter: &Painter,
         ui: &mut egui::Ui,
@@ -2043,7 +2135,14 @@ impl SequenceDiagram {
         const MARKER_OFFSET: f32 = 12.0;
 
         for event in events {
-            let y = time_to_y(event.time);
+            // Apply server time offset to server-side events (subtract to pull UP)
+            let server_file_idx = if self.files_swapped { 0 } else { 1 };
+            let time = if event.file_idx == server_file_idx {
+                event.time - self.server_time_offset_ms
+            } else {
+                event.time
+            };
+            let y = time_to_y(time);
             // Position markers based on which file the event came from
             let x = if event.file_idx == 0 {
                 layout.left_x - MARKER_OFFSET
