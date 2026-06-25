@@ -140,10 +140,8 @@ impl ConnectionStats {
                         stats.max_rtt = Some(stats.max_rtt.map_or(rtt, |m| m.max(rtt)));
                     }
                 }
-                EventData::QuicConnectionStarted(_) => {
-                    if handshake_start.is_none() {
-                        handshake_start = Some(event.time);
-                    }
+                EventData::QuicConnectionStarted(_) if handshake_start.is_none() => {
+                    handshake_start = Some(event.time);
                 }
                 EventData::QuicConnectionStateUpdated(data) => {
                     let state_str = format!("{:?}", data.new);
@@ -336,8 +334,7 @@ impl StatsView {
                 ui.end_row();
 
                 if stats.total_duration > 0.0 && stats.bytes_sent > 0 {
-                    let throughput =
-                        stats.bytes_sent as f64 / (stats.total_duration as f64 / 1000.0);
+                    let throughput = stats.bytes_sent as f64 / (stats.total_duration / 1000.0);
                     ui.label("Avg Send Throughput:");
                     ui.label(
                         RichText::new(format!("{}/s", format_bytes(throughput as u64))).strong(),
@@ -346,8 +343,7 @@ impl StatsView {
                 }
 
                 if stats.total_duration > 0.0 && stats.bytes_received > 0 {
-                    let throughput =
-                        stats.bytes_received as f64 / (stats.total_duration as f64 / 1000.0);
+                    let throughput = stats.bytes_received as f64 / (stats.total_duration / 1000.0);
                     ui.label("Avg Recv Throughput:");
                     ui.label(
                         RichText::new(format!("{}/s", format_bytes(throughput as u64))).strong(),

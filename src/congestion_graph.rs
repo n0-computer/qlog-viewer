@@ -127,10 +127,10 @@ impl CongestionGraph {
             if self.show_congestion_states {
                 for period in &correlation.congestion_states {
                     let points = vec![
-                        [period.start_time as f64, 0.0],
-                        [period.start_time as f64, max_y],
-                        [period.end_time as f64, max_y],
-                        [period.end_time as f64, 0.0],
+                        [period.start_time, 0.0],
+                        [period.start_time, max_y],
+                        [period.end_time, max_y],
+                        [period.end_time, 0.0],
                     ];
                     let polygon = Polygon::new(period.state.name(), PlotPoints::from(points))
                         .fill_color(period.state.color())
@@ -142,10 +142,10 @@ impl CongestionGraph {
             if self.show_ecn_states {
                 for period in &correlation.ecn_states {
                     let points = vec![
-                        [period.start_time as f64, 0.0],
-                        [period.start_time as f64, max_y],
-                        [period.end_time as f64, max_y],
-                        [period.end_time as f64, 0.0],
+                        [period.start_time, 0.0],
+                        [period.start_time, max_y],
+                        [period.end_time, max_y],
+                        [period.end_time, 0.0],
                     ];
                     let polygon = Polygon::new(period.name(), PlotPoints::from(points))
                         .fill_color(period.color())
@@ -159,7 +159,7 @@ impl CongestionGraph {
                 {
                     if gap.duration >= self.time_gap_threshold_ms {
                         let intensity = ((gap.duration / 500.0).min(1.0) * 200.0) as u8;
-                        let vline = VLine::new("", gap.start_time as f64)
+                        let vline = VLine::new("", gap.start_time)
                             .color(Color32::from_rgba_unmultiplied(255, 100, 0, 50 + intensity))
                             .width(2.0);
                         plot_ui.vline(vline);
@@ -321,7 +321,7 @@ impl CongestionGraph {
         let mut cumulative_lost: u64 = 0;
 
         for event in qlog_data.events.iter() {
-            let time = event.time as f64;
+            let time = event.time;
 
             let event_path_id = get_event_path_id(&event.data);
             if event_path_id != path_id {

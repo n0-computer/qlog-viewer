@@ -77,7 +77,7 @@ impl MultiplexingDiagram {
         let mut total_segments = 0usize;
 
         for event in qlog_data.events.iter() {
-            let time = event.time as f64;
+            let time = event.time;
 
             match &event.data {
                 EventData::QuicPacketSent(data) => {

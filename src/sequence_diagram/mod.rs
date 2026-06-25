@@ -1447,7 +1447,7 @@ impl SequenceDiagram {
                 let path_id = Self::extract_path_id(event, header.path_id);
 
                 Some(Arc::new(PacketInfo {
-                    time: event.time as f64,
+                    time: event.time,
                     direction,
                     packet_type,
                     packet_type_short,
@@ -1508,7 +1508,7 @@ impl SequenceDiagram {
                     let color = event_type.color();
                     let display_style = event_type.display_style();
                     Some(MetricsEvent {
-                        time: event.time as f64,
+                        time: event.time,
                         event_type,
                         display_text: "connection started".to_string(),
                         detail_text: format!("Connection initiated at {:.3}ms", event.time),
@@ -1584,7 +1584,7 @@ impl SequenceDiagram {
                             let color = event_type.color();
                             let display_style = event_type.display_style();
                             Some(MetricsEvent {
-                                time: event.time as f64,
+                                time: event.time,
                                 event_type,
                                 display_text: display,
                                 detail_text: detail,
@@ -1607,7 +1607,7 @@ impl SequenceDiagram {
                     let color = event_type.color();
                     let display_style = event_type.display_style();
                     Some(MetricsEvent {
-                        time: event.time as f64,
+                        time: event.time,
                         event_type,
                         display_text: format!("{:?}", data.new),
                         detail_text: format!(
@@ -1629,7 +1629,7 @@ impl SequenceDiagram {
                     let color = event_type.color();
                     let display_style = event_type.display_style();
                     Some(MetricsEvent {
-                        time: event.time as f64,
+                        time: event.time,
                         event_type,
                         display_text: format!("{:?}", data.new),
                         detail_text: format!("Connection state: {:?}", data.new),
@@ -1650,7 +1650,7 @@ impl SequenceDiagram {
                             let color = event_type.color();
                             let display_style = event_type.display_style();
                             Some(MetricsEvent {
-                                time: event.time as f64,
+                                time: event.time,
                                 event_type,
                                 display_text: format!("lost PN {}", pn),
                                 detail_text: format!("Packet {} lost at {:.3}ms", pn, event.time),
@@ -1700,7 +1700,7 @@ impl SequenceDiagram {
                     }
 
                     Some(MetricsEvent {
-                        time: event.time as f64,
+                        time: event.time,
                         event_type,
                         display_text,
                         detail_text: detail_parts.join(", "),
@@ -1721,7 +1721,7 @@ impl SequenceDiagram {
                     let event_type = MetricsEventType::Other(event_name.clone());
                     let display_style = event_type.display_style();
                     Some(MetricsEvent {
-                        time: event.time as f64,
+                        time: event.time,
                         event_type,
                         display_text: event_name,
                         detail_text: format!("{:?}", other),

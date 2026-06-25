@@ -362,7 +362,7 @@ pub fn format_rtt(ms: f32) -> String {
 }
 
 /// Format acked ranges as a comma-separated list of ranges.
-pub fn format_acked_ranges(ranges: &Vec<AckRange>) -> String {
+pub fn format_acked_ranges(ranges: &[AckRange]) -> String {
     ranges
         .iter()
         .map(|r| {
