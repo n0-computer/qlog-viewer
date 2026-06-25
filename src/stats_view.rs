@@ -25,11 +25,11 @@ pub struct ConnectionStats {
     pub min_rtt: Option<f32>,
     pub avg_rtt: Option<f32>,
     pub max_rtt: Option<f32>,
-    pub handshake_duration: Option<f32>,
-    pub total_duration: f32,
+    pub handshake_duration: Option<f64>,
+    pub total_duration: f64,
     pub stream_stats: HashMap<u64, StreamStats>,
-    pub first_event_time: f32,
-    pub last_event_time: f32,
+    pub first_event_time: f64,
+    pub last_event_time: f64,
 }
 
 impl Default for ConnectionStats {
@@ -65,13 +65,13 @@ impl ConnectionStats {
         stats.last_event_time = qlog.events.last().map(|e| e.time).unwrap_or(0.0);
         stats.total_duration = stats.last_event_time - stats.first_event_time;
 
-        let mut handshake_start: Option<f32> = None;
-        let mut handshake_end: Option<f32> = None;
+        let mut handshake_start: Option<f64> = None;
+        let mut handshake_end: Option<f64> = None;
         let mut rtt_samples: Vec<f32> = Vec::new();
 
         for event in &qlog.events {
             match &event.data {
-                EventData::PacketSent(data) => {
+                EventData::QuicPacketSent(data) => {
                     stats.packets_sent += 1;
                     // Try to get packet size from raw, or estimate from frames
                     let packet_bytes =
@@ -101,7 +101,7 @@ impl ConnectionStats {
                         }
                     }
                 }
-                EventData::PacketReceived(data) => {
+                EventData::QuicPacketReceived(data) => {
                     stats.packets_received += 1;
                     // Try to get packet size from raw, or estimate from frames
                     let packet_bytes =
@@ -130,22 +130,20 @@ impl ConnectionStats {
                         }
                     }
                 }
-                EventData::PacketLost(_) => {
+                EventData::QuicPacketLost(_) => {
                     stats.packets_lost += 1;
                 }
-                EventData::MetricsUpdated(data) => {
+                EventData::QuicMetricsUpdated(data) => {
                     if let Some(rtt) = data.latest_rtt {
                         rtt_samples.push(rtt);
                         stats.min_rtt = Some(stats.min_rtt.map_or(rtt, |m| m.min(rtt)));
                         stats.max_rtt = Some(stats.max_rtt.map_or(rtt, |m| m.max(rtt)));
                     }
                 }
-                EventData::ConnectionStarted(_) => {
-                    if handshake_start.is_none() {
-                        handshake_start = Some(event.time);
-                    }
+                EventData::QuicConnectionStarted(_) if handshake_start.is_none() => {
+                    handshake_start = Some(event.time);
                 }
-                EventData::ConnectionStateUpdated(data) => {
+                EventData::QuicConnectionStateUpdated(data) => {
                     let state_str = format!("{:?}", data.new);
                     if (state_str.to_lowercase().contains("handshake_done")
                         || state_str.to_lowercase().contains("connected"))
@@ -336,8 +334,7 @@ impl StatsView {
                 ui.end_row();
 
                 if stats.total_duration > 0.0 && stats.bytes_sent > 0 {
-                    let throughput =
-                        stats.bytes_sent as f64 / (stats.total_duration as f64 / 1000.0);
+                    let throughput = stats.bytes_sent as f64 / (stats.total_duration / 1000.0);
                     ui.label("Avg Send Throughput:");
                     ui.label(
                         RichText::new(format!("{}/s", format_bytes(throughput as u64))).strong(),
@@ -346,8 +343,7 @@ impl StatsView {
                 }
 
                 if stats.total_duration > 0.0 && stats.bytes_received > 0 {
-                    let throughput =
-                        stats.bytes_received as f64 / (stats.total_duration as f64 / 1000.0);
+                    let throughput = stats.bytes_received as f64 / (stats.total_duration / 1000.0);
                     ui.label("Avg Recv Throughput:");
                     ui.label(
                         RichText::new(format!("{}/s", format_bytes(throughput as u64))).strong(),

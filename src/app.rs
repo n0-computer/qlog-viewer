@@ -404,54 +404,54 @@ impl QlogViewerApp {
         ui.label(format!("Time: {}", data.format_time(event)));
 
         if !event.ex_data.is_empty() {
-            for (key, value) in &event.ex_data {
+            for (key, value) in event.ex_data.iter() {
                 ui.label(format!("[EX] {key}: {value}"));
             }
         }
         match event.data {
-            EventData::ParametersSet(ref params) => {
+            EventData::QuicParametersSet(ref params) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
                 render_transport_parameters(ui, params, id_prefix, idx);
             }
-            EventData::ParametersRestored(ref params) => {
+            EventData::QuicParametersRestored(ref params) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
                 render_parameters_restored(ui, params);
             }
-            EventData::RecoveryParametersSet(ref params) => {
+            EventData::QuicRecoveryParametersSet(ref params) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
                 render_recovery_parameters(ui, params);
             }
-            EventData::MetricsUpdated(ref params) => {
+            EventData::QuicMetricsUpdated(ref params) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
                 render_recovery_metrics_updated(ui, params, id_prefix, idx);
             }
-            EventData::TimerUpdated(ref timer) => {
+            EventData::QuicTimerUpdated(ref timer) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
                 render_timer_updated(ui, timer, id_prefix, idx);
             }
-            EventData::EcnStateUpdated(ref ecn) => {
+            EventData::QuicEcnStateUpdated(ref ecn) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
                 render_ecn_state_updated(ui, ecn, id_prefix, idx);
             }
-            EventData::ConnectionStarted(ref started) => {
+            EventData::QuicConnectionStarted(ref started) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
                 render_connection_started(ui, started, id_prefix, idx)
             }
-            EventData::TupleAssigned(ref tuple) => {
+            EventData::QuicTupleAssigned(ref tuple) => {
                 ui.add_space(5.);
                 ui.separator();
                 ui.add_space(5.);
@@ -478,11 +478,13 @@ impl QlogViewerApp {
 
         if event.data.contains_quic_frames().is_some() {
             let frame_count = match &event.data {
-                EventData::PacketSent(pkt) => pkt.frames.as_ref().map(|f| f.len()).unwrap_or(0),
-                EventData::PacketReceived(pkt) => pkt.frames.as_ref().map(|f| f.len()).unwrap_or(0),
-                EventData::PacketLost(pkt) => pkt.frames.as_ref().map(|f| f.len()).unwrap_or(0),
-                EventData::MarkedForRetransmit(ev) => ev.frames.len(),
-                EventData::FramesProcessed(ev) => ev.frames.len(),
+                EventData::QuicPacketSent(pkt) => pkt.frames.as_ref().map(|f| f.len()).unwrap_or(0),
+                EventData::QuicPacketReceived(pkt) => {
+                    pkt.frames.as_ref().map(|f| f.len()).unwrap_or(0)
+                }
+                EventData::QuicPacketLost(pkt) => pkt.frames.as_ref().map(|f| f.len()).unwrap_or(0),
+                EventData::QuicMarkedForRetransmit(ev) => ev.frames.len(),
+                EventData::QuicFramesProcessed(ev) => ev.frames.len(),
                 _ => 0,
             };
             ui.add_space(5.);
@@ -491,33 +493,33 @@ impl QlogViewerApp {
             render_section_header(ui, &format!("Frames ({})", frame_count));
             ui.add_space(4.0);
             match event.data {
-                EventData::PacketSent(ref pkt) => {
+                EventData::QuicPacketSent(ref pkt) => {
                     if let Some(ref frames) = pkt.frames {
                         for (i, frame) in frames.iter().enumerate() {
                             render_frame_with_prefix(ui, id_prefix, idx, i, frame);
                         }
                     }
                 }
-                EventData::PacketReceived(ref pkt) => {
+                EventData::QuicPacketReceived(ref pkt) => {
                     if let Some(ref frames) = pkt.frames {
                         for (i, frame) in frames.iter().enumerate() {
                             render_frame_with_prefix(ui, id_prefix, idx, i, frame);
                         }
                     }
                 }
-                EventData::PacketLost(ref pkt) => {
+                EventData::QuicPacketLost(ref pkt) => {
                     if let Some(ref frames) = pkt.frames {
                         for (i, frame) in frames.iter().enumerate() {
                             render_frame_with_prefix(ui, id_prefix, idx, i, frame);
                         }
                     }
                 }
-                EventData::MarkedForRetransmit(ref ev) => {
+                EventData::QuicMarkedForRetransmit(ref ev) => {
                     for (i, frame) in ev.frames.iter().enumerate() {
                         render_frame_with_prefix(ui, id_prefix, idx, i, frame);
                     }
                 }
-                EventData::FramesProcessed(ref ev) => {
+                EventData::QuicFramesProcessed(ref ev) => {
                     for (i, frame) in ev.frames.iter().enumerate() {
                         render_frame_with_prefix(ui, id_prefix, idx, i, frame);
                     }
@@ -640,7 +642,7 @@ impl QlogViewerApp {
 
         for event in &data.events {
             match &event.data {
-                EventData::PacketSent(d) => {
+                EventData::QuicPacketSent(d) => {
                     let pkt_type = utils::full_packet_type(&format!("{:?}", d.header.packet_type));
                     packet_types.insert(pkt_type);
                     if let Some(path_id) = d.header.path_id {
@@ -655,7 +657,7 @@ impl QlogViewerApp {
                         }
                     }
                 }
-                EventData::PacketReceived(d) => {
+                EventData::QuicPacketReceived(d) => {
                     let pkt_type = utils::full_packet_type(&format!("{:?}", d.header.packet_type));
                     packet_types.insert(pkt_type);
                     if let Some(path_id) = d.header.path_id {
@@ -670,17 +672,17 @@ impl QlogViewerApp {
                         }
                     }
                 }
-                EventData::PacketLost(d) => {
+                EventData::QuicPacketLost(d) => {
                     if let Some(ref header) = d.header {
                         if let Some(path_id) = header.path_id {
                             path_ids.insert(path_id);
                         }
                     }
                 }
-                EventData::StreamStateUpdated(d) => {
+                EventData::QuicStreamStateUpdated(d) => {
                     stream_ids.insert(d.stream_id);
                 }
-                EventData::FramesProcessed(d) => {
+                EventData::QuicFramesProcessed(d) => {
                     for frame in d.frames.iter() {
                         if let Some(sid) = utils::get_frame_stream_id(frame) {
                             stream_ids.insert(sid);

@@ -309,7 +309,7 @@ pub fn render_event_list(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show_rows(ui, row_height, filtered_events.len(), |ui, row_range| {
-            let mut prev_time: Option<f32> = if row_range.start > 0 {
+            let mut prev_time: Option<f64> = if row_range.start > 0 {
                 filtered_events
                     .get(row_range.start - 1)
                     .map(|(_, e)| e.time)
@@ -429,11 +429,11 @@ pub fn render_event_list(
 
 pub fn get_event_packet_type(event: &Event) -> Option<String> {
     match &event.data {
-        EventData::PacketSent(d) => Some(utils::full_packet_type(&format!(
+        EventData::QuicPacketSent(d) => Some(utils::full_packet_type(&format!(
             "{:?}",
             d.header.packet_type
         ))),
-        EventData::PacketReceived(d) => Some(utils::full_packet_type(&format!(
+        EventData::QuicPacketReceived(d) => Some(utils::full_packet_type(&format!(
             "{:?}",
             d.header.packet_type
         ))),
@@ -443,8 +443,8 @@ pub fn get_event_packet_type(event: &Event) -> Option<String> {
 
 pub fn get_event_stream_id(event: &Event) -> Option<u64> {
     match &event.data {
-        EventData::StreamStateUpdated(d) => Some(d.stream_id),
-        EventData::FramesProcessed(d) => {
+        EventData::QuicStreamStateUpdated(d) => Some(d.stream_id),
+        EventData::QuicFramesProcessed(d) => {
             for frame in d.frames.iter() {
                 if let QuicFrame::Stream { stream_id, .. } = frame {
                     return Some(*stream_id);
@@ -458,30 +458,30 @@ pub fn get_event_stream_id(event: &Event) -> Option<u64> {
 
 pub fn get_event_path_id(event: &Event) -> Option<u64> {
     match &event.data {
-        EventData::PacketSent(d) => d.header.path_id,
-        EventData::PacketReceived(d) => d.header.path_id,
-        EventData::PacketLost(d) => d.header.as_ref().and_then(|h| h.path_id),
+        EventData::QuicPacketSent(d) => d.header.path_id,
+        EventData::QuicPacketReceived(d) => d.header.path_id,
+        EventData::QuicPacketLost(d) => d.header.as_ref().and_then(|h| h.path_id),
         _ => None,
     }
 }
 
 pub fn get_event_category(event: &Event) -> &'static str {
     match &event.data {
-        EventData::PacketSent(_)
-        | EventData::PacketReceived(_)
-        | EventData::PacketLost(_)
-        | EventData::PacketsAcked(_) => "packet",
-        EventData::MetricsUpdated(_) | EventData::CongestionStateUpdated(_) => "metrics",
-        EventData::TimerUpdated(_) => "timer",
-        EventData::ConnectionStarted(_)
-        | EventData::ConnectionStateUpdated(_)
-        | EventData::ConnectionClosed(_)
-        | EventData::TupleAssigned(_) => "connection",
-        EventData::RecoveryParametersSet(_)
-        | EventData::ParametersRestored(_)
-        | EventData::ParametersSet(_)
-        | EventData::EcnStateUpdated(_) => "recovery",
-        EventData::StreamStateUpdated(_) | EventData::FramesProcessed(_) => "stream",
+        EventData::QuicPacketSent(_)
+        | EventData::QuicPacketReceived(_)
+        | EventData::QuicPacketLost(_)
+        | EventData::QuicPacketsAcked(_) => "packet",
+        EventData::QuicMetricsUpdated(_) | EventData::QuicCongestionStateUpdated(_) => "metrics",
+        EventData::QuicTimerUpdated(_) => "timer",
+        EventData::QuicConnectionStarted(_)
+        | EventData::QuicConnectionStateUpdated(_)
+        | EventData::QuicConnectionClosed(_)
+        | EventData::QuicTupleAssigned(_) => "connection",
+        EventData::QuicRecoveryParametersSet(_)
+        | EventData::QuicParametersRestored(_)
+        | EventData::QuicParametersSet(_)
+        | EventData::QuicEcnStateUpdated(_) => "recovery",
+        EventData::QuicStreamStateUpdated(_) | EventData::QuicFramesProcessed(_) => "stream",
         _ => "other",
     }
 }

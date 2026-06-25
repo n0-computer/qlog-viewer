@@ -713,7 +713,7 @@ impl PacketizationDiagram {
 
         for (event_idx, event) in qlog_data.events.iter().enumerate() {
             match &event.data {
-                EventData::PacketSent(data) => {
+                EventData::QuicPacketSent(data) => {
                     Self::process_packet(
                         data.header.path_id.unwrap_or(DEFAULT_PATH_ID),
                         data.raw
@@ -728,7 +728,7 @@ impl PacketizationDiagram {
                         &mut sent,
                     );
                 }
-                EventData::PacketReceived(data) => {
+                EventData::QuicPacketReceived(data) => {
                     Self::process_packet(
                         data.header.path_id.unwrap_or(DEFAULT_PATH_ID),
                         data.raw

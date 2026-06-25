@@ -753,30 +753,30 @@ pub fn render_raw_info(ui: &mut egui::Ui, raw: &RawInfo) {
     }
     if let Some(ref data) = raw.data {
         ui.label("Raw Info: Data");
-        ui.label(data);
+        ui.label(data.as_str());
         ui.end_row();
     }
 }
 
 pub fn render_header(ui: &mut egui::Ui, event: &EventData, id_prefix: &str, idx: usize) {
     match event {
-        EventData::PacketSent(ref data) => {
+        EventData::QuicPacketSent(ref data) => {
             render_inner_header(ui, &data.header, id_prefix, idx);
         }
-        EventData::PacketReceived(ref data) => {
+        EventData::QuicPacketReceived(ref data) => {
             render_inner_header(ui, &data.header, id_prefix, idx);
         }
-        EventData::PacketDropped(ref data) => {
+        EventData::QuicPacketDropped(ref data) => {
             if let Some(ref header) = data.header {
                 render_inner_header(ui, header, id_prefix, idx);
             }
         }
-        EventData::PacketBuffered(ref data) => {
+        EventData::QuicPacketBuffered(ref data) => {
             if let Some(ref header) = data.header {
                 render_inner_header(ui, header, id_prefix, idx);
             }
         }
-        EventData::PacketLost(ref data) => {
+        EventData::QuicPacketLost(ref data) => {
             if let Some(ref header) = data.header {
                 render_inner_header(ui, header, id_prefix, idx);
             }

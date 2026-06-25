@@ -18,7 +18,7 @@ pub struct CongestionGraph {
     show_congestion_states: bool,
     show_ecn_states: bool,
     show_time_gaps: bool,
-    time_gap_threshold_ms: f32,
+    time_gap_threshold_ms: f64,
     selected_path_id: u64,
 }
 
@@ -127,10 +127,10 @@ impl CongestionGraph {
             if self.show_congestion_states {
                 for period in &correlation.congestion_states {
                     let points = vec![
-                        [period.start_time as f64, 0.0],
-                        [period.start_time as f64, max_y],
-                        [period.end_time as f64, max_y],
-                        [period.end_time as f64, 0.0],
+                        [period.start_time, 0.0],
+                        [period.start_time, max_y],
+                        [period.end_time, max_y],
+                        [period.end_time, 0.0],
                     ];
                     let polygon = Polygon::new(period.state.name(), PlotPoints::from(points))
                         .fill_color(period.state.color())
@@ -142,10 +142,10 @@ impl CongestionGraph {
             if self.show_ecn_states {
                 for period in &correlation.ecn_states {
                     let points = vec![
-                        [period.start_time as f64, 0.0],
-                        [period.start_time as f64, max_y],
-                        [period.end_time as f64, max_y],
-                        [period.end_time as f64, 0.0],
+                        [period.start_time, 0.0],
+                        [period.start_time, max_y],
+                        [period.end_time, max_y],
+                        [period.end_time, 0.0],
                     ];
                     let polygon = Polygon::new(period.name(), PlotPoints::from(points))
                         .fill_color(period.color())
@@ -159,7 +159,7 @@ impl CongestionGraph {
                 {
                     if gap.duration >= self.time_gap_threshold_ms {
                         let intensity = ((gap.duration / 500.0).min(1.0) * 200.0) as u8;
-                        let vline = VLine::new("", gap.start_time as f64)
+                        let vline = VLine::new("", gap.start_time)
                             .color(Color32::from_rgba_unmultiplied(255, 100, 0, 50 + intensity))
                             .width(2.0);
                         plot_ui.vline(vline);
@@ -285,10 +285,10 @@ impl CongestionGraph {
 
         for event in qlog_data.events.iter() {
             let path_id = match &event.data {
-                EventData::PacketSent(data) => data.header.path_id,
-                EventData::PacketReceived(data) => data.header.path_id,
-                EventData::PacketLost(data) => data.header.as_ref().and_then(|h| h.path_id),
-                EventData::MetricsUpdated(data) => data.path_id,
+                EventData::QuicPacketSent(data) => data.header.path_id,
+                EventData::QuicPacketReceived(data) => data.header.path_id,
+                EventData::QuicPacketLost(data) => data.header.as_ref().and_then(|h| h.path_id),
+                EventData::QuicMetricsUpdated(data) => data.path_id,
                 _ => None,
             };
 
@@ -321,7 +321,7 @@ impl CongestionGraph {
         let mut cumulative_lost: u64 = 0;
 
         for event in qlog_data.events.iter() {
-            let time = event.time as f64;
+            let time = event.time;
 
             let event_path_id = get_event_path_id(&event.data);
             if event_path_id != path_id {
@@ -329,7 +329,7 @@ impl CongestionGraph {
             }
 
             match &event.data {
-                EventData::MetricsUpdated(data) => {
+                EventData::QuicMetricsUpdated(data) => {
                     metrics_event_count += 1;
 
                     if let Some(cwnd) = data.congestion_window {
@@ -352,7 +352,7 @@ impl CongestionGraph {
                         min_rtt_points.push([time, mrtt as f64]);
                     }
                 }
-                EventData::PacketSent(data) => {
+                EventData::QuicPacketSent(data) => {
                     packets_sent += 1;
                     let packet_size = data
                         .raw
@@ -362,7 +362,7 @@ impl CongestionGraph {
                     cumulative_sent += packet_size;
                     data_sent_points.push([time, cumulative_sent as f64]);
                 }
-                EventData::PacketReceived(data) => {
+                EventData::QuicPacketReceived(data) => {
                     packets_acked += 1;
                     let packet_size = data
                         .raw
@@ -372,7 +372,7 @@ impl CongestionGraph {
                     cumulative_acked += packet_size;
                     data_acked_points.push([time, cumulative_acked as f64]);
                 }
-                EventData::PacketLost(_data) => {
+                EventData::QuicPacketLost(_data) => {
                     cumulative_lost += DEFAULT_PACKET_SIZE;
                     data_lost_points.push([time, cumulative_lost as f64]);
                 }
